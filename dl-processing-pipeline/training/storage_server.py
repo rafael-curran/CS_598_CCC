@@ -13,6 +13,7 @@ import time
 from io import BytesIO
 import argparse
 from utils import DecodeJPEG, ConditionalNormalize, ImagePathDataset
+from multiprocessing import Value
 
 from PIL import Image
 kill = mp.Event()  # Global event to signal termination
@@ -92,7 +93,7 @@ def fill_queue(q, kill, batch_size, dataset_path, offloading_plan, offloading_va
             elif isinstance(transformed_data, torch.Tensor):
                 # If it's a PyTorch tensor, convert to numpy and then to bytes
                 transformed_data = transformed_data.numpy().tobytes()  # Convert tensor to numpy and Serialize numpy array to bytes 
-            if compression_value == 1:
+            if compression_value.value == 1:
                 transformed_data = zlib.compress(transformed_data)  # Compress data
                 is_compressed = True
             else:
@@ -116,6 +117,9 @@ def serve(offloading_value, compression_value):
 
     # Cache for storing the offloading plan (sample_id -> number of transformations)
     offloading_plan = {}
+
+    # Create a shared variable for the compression value
+    compression_value = Value('i', compression_value)  # 'i' for integer
 
     # Start the fill_queue process
     workers = []

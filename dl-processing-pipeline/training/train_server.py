@@ -49,7 +49,7 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                         ' (default: resnet18)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=90, type=int, metavar='N',
+parser.add_argument('--epochs', default=10, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -58,7 +58,7 @@ parser.add_argument('-b', '--batch-size', default=256, type=int,
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+parser.add_argument('--lr', '--learning-rate', default=0.001, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
@@ -145,6 +145,8 @@ def main():
 def main_worker(gpu, ngpus_per_node, args):
     global best_acc1
     args.gpu = gpu
+    # Define the number of classes
+    num_classes = 20  # Change this value based on your dataset
 
     if args.gpu is not None:
         print("Use GPU: {} for training".format(args.gpu))
@@ -165,6 +167,11 @@ def main_worker(gpu, ngpus_per_node, args):
     else:
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
+
+    if 'resnet' in args.arch or 'densenet' in args.arch:
+        model.fc = nn.Linear(model.fc.in_features, num_classes)
+    elif 'vgg' in args.arch or 'alexnet' in args.arch:
+        model.classifier[-1] = nn.Linear(model.classifier[-1].in_features, num_classes)
 
     if not torch.cuda.is_available() and not torch.backends.mps.is_available():
         print('using CPU, this will be slow')
@@ -256,8 +263,8 @@ def main_worker(gpu, ngpus_per_node, args):
 
     if args.dummy:
         print("=> Dummy data is used!")
-        train_dataset = datasets.FakeData(1281167, (3, 224, 224), 1000, transforms.ToTensor())
-        val_dataset = datasets.FakeData(50000, (3, 224, 224), 1000, transforms.ToTensor())
+        train_dataset = datasets.FakeData(1281167, (3, 224, 224), 20, transforms.ToTensor())
+        val_dataset = datasets.FakeData(50000, (3, 224, 224), 20, transforms.ToTensor())
     else:
         train_dataset = RemoteDataset(args.grpc_host, args.grpc_port, batch_size=args.batch_size)
 
@@ -295,10 +302,11 @@ def main_worker(gpu, ngpus_per_node, args):
         print("Validation completed.")
         return
 
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in range(args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
+        print("the current epoch :{}".format(epoch))
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, device, args)
 
@@ -330,7 +338,7 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
     top1 = AverageMeter('Acc@1', ':6.2f')
     top5 = AverageMeter('Acc@5', ':6.2f')
 
-    num_batches = 100000  # Adjust as needed
+    num_batches = 1600  # Adjust as needed original (1000 classes, 100 images per class), simple (20 classes, 80 images per class)
     progress = ProgressMeter(
         num_batches,
         [batch_time, data_time, losses, top1, top5],
@@ -341,6 +349,9 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
     end = time.time()
 
     for i, (images, target) in enumerate(train_loader):
+        print(i, images.shape, target)
+        if i >= 1600:
+            break
         # Flatten the nested batches into a single batch dimension
         images = images.view(-1, 3, 224, 224)  # Flatten: (2, 2, 3, 224, 224) -> (4, 3, 224, 224)
         target = target.view(-1)  # Adjust target as well
@@ -349,8 +360,10 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
 
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
-
+        print(i, images.shape, target)
         output = model(images)
+        # print(output.shape)
+        # print(output)
         loss = criterion(output, target)
 
         acc1, acc5 = accuracy(output, target, topk=(1, 5))
@@ -376,6 +389,10 @@ def validate(val_loader, model, criterion, args):
         with torch.no_grad():
             end = time.time()
             for i, (images, target) in enumerate(loader):
+                print(i, images.shape, target)
+                target = torch.tensor(target)
+                images = images.view(-1, 3, 224, 224)  # Flatten: (2, 2, 3, 224, 224) -> (4, 3, 224, 224)
+                target = target.view(-1)
                 i = base_progress + i
                 if args.gpu is not None and torch.cuda.is_available():
                     images = images.cuda(args.gpu, non_blocking=True)
@@ -384,7 +401,7 @@ def validate(val_loader, model, criterion, args):
                     target = target.to('mps')
                 if torch.cuda.is_available():
                     target = target.cuda(args.gpu, non_blocking=True)
-
+                print(images.shape)
                 # compute output
                 output = model(images)
                 loss = criterion(output, target)
