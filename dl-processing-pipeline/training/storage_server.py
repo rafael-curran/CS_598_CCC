@@ -9,6 +9,7 @@ from torch.utils.data import Dataset
 import numpy as np
 import os
 import zlib
+import random
 import time
 from io import BytesIO
 import argparse
@@ -67,47 +68,57 @@ def fill_queue(q, kill, batch_size, dataset_path, offloading_plan, offloading_va
 
     # Ensure that ImageFolder uses the transform to convert images to tensors
     dataset = ImagePathDataset(os.path.join(dataset_path, 'train'))
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=16, pin_memory=True, collate_fn=custom_collate_fn)
 
-    for batch_idx, (data, target) in enumerate(loader):
-        print(f"Worker {worker_id} - Batch {batch_idx}: Loaded {len(data)} images.")
-        for i in range(len(data)):  # Loop over individual samples
-            sample_id = batch_idx * batch_size + i
-            if offloading_value == 0:
-                num_transformations = 0
-            elif offloading_value == 1:
-                num_transformations = 5
-            else:
-                num_transformations = offloading_plan.get(sample_id, 0) 
+    print(kill.is_set())
+    while not kill.is_set():
+        # Shuffle dataset
+        indices = list(range(len(dataset)))
+        random.shuffle(indices)
+        shuffled_dataset = torch.utils.data.Subset(dataset, indices)
+        loader = torch.utils.data.DataLoader(shuffled_dataset, batch_size=batch_size, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
 
-            transformed_data = data[i]  
-            for j in range(min(num_transformations, 5)):  
-                transformed_data = transformations[j](transformed_data)
+        for batch_idx, (data, target) in enumerate(loader):
+            if kill.is_set():
+                break  # Stop if termination signal is set
+            print(f"Worker {worker_id} - Batch {batch_idx}: Loaded {len(data)} images.")
+            for i in range(len(data)):  # Loop over individual samples
+                sample_id = batch_idx * batch_size + i
+                if offloading_value == 0:
+                    num_transformations = 0
+                elif offloading_value == 1:
+                    num_transformations = 5
+                else:
+                    num_transformations = offloading_plan.get(sample_id, 0)
 
-            # Serialize the transformed data
-            if isinstance(transformed_data, Image.Image):
-                # If it's still a PIL image, convert it to bytes
-                img_byte_arr = BytesIO()
-                transformed_data.save(img_byte_arr, format='JPEG')  
-                transformed_data = img_byte_arr.getvalue()  # Get image in bytes
-            elif isinstance(transformed_data, torch.Tensor):
-                # If it's a PyTorch tensor, convert to numpy and then to bytes
-                transformed_data = transformed_data.numpy().tobytes()  # Convert tensor to numpy and Serialize numpy array to bytes 
-            if compression_value.value == 1:
-                transformed_data = zlib.compress(transformed_data)  # Compress data
-                is_compressed = True
-            else:
+                transformed_data = data[i]
+                for j in range(min(num_transformations, 5)):
+                    transformed_data = transformations[j](transformed_data)
+
+                # Serialize the transformed data
+                if isinstance(transformed_data, Image.Image):
+                    # If it's still a PIL image, convert it to bytes
+                    img_byte_arr = BytesIO()
+                    transformed_data.save(img_byte_arr, format='JPEG')
+                    transformed_data = img_byte_arr.getvalue()  # Get image in bytes
+                elif isinstance(transformed_data, torch.Tensor):
+                    # If it's a PyTorch tensor, convert to numpy and then to bytes
+                    transformed_data = transformed_data.numpy().tobytes()  # Convert tensor to numpy and Serialize numpy array to bytes
+
                 is_compressed = False
-            # time.sleep(1) this was used to simulare low network bandwidth but it is a crude proxy
+                if compression_value.value == 1:
+                    transformed_data = zlib.compress(transformed_data)  # Compress data
+                    is_compressed = True
 
-            # Add the sample and the number of applied transformations to the queue
-            added = False
-            while not added and not kill.is_set():
-                try:
-                    q.put((transformed_data, target[i], num_transformations, is_compressed), timeout=1)
-                    added = True
-                except:
-                    continue
+                # time.sleep(1) this was used to simulare low network bandwidth but it is a crude proxy
+
+                # Add the sample and the number of applied transformations to the queue
+                added = False
+                while not added and not kill.is_set():
+                    try:
+                        q.put((transformed_data, target[i], num_transformations, is_compressed), timeout=1)
+                        added = True
+                    except:
+                        continue
 
 
 

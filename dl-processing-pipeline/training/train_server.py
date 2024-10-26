@@ -3,6 +3,7 @@ import os
 import random
 import shutil
 import time
+import json
 import warnings
 from enum import Enum
 
@@ -30,14 +31,18 @@ import zlib
 from profiler import Profiler  # Assuming the profiler is in a separate file
 from decision_engine import DecisionEngine  # Assuming the decision engine is in a separate file
 
-from utils import DecodeJPEG, ConditionalNormalize, RemoteDataset  
+
+from utils import RemoteDataset
+import datetime
+import os
+# Generate a unique filename based on the current datetime
+# filename = f"experiment_statistics_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+from utils import DecodeJPEG, ConditionalNormalize, RemoteDataset
 
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
-
-
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
 parser.add_argument('data', metavar='DIR', nargs='?', default='imagenet',
@@ -94,6 +99,8 @@ parser.add_argument('--dummy', action='store_true', help="use fake data to bench
 parser.add_argument('--grpc-host', default='localhost', type=str, help='Host of the gRPC server')
 parser.add_argument('--grpc-port', default='50051', type=str, help='Port of the gRPC server')
 parser.add_argument('--profile-only', action='store_true', help='run profiling only without training')
+parser.add_argument('--main-worker-epoch-log', type=str, default='logs/main_worker/main_worker_epoch_log.json', help='File to log epoch metrics (default: ain_worker_epoch_log.json)')
+parser.add_argument('--train-epoch-log', type=str, default='logs/train/train_epoch_log.json', help='File to log training epoch metrics (default: train_epoch_log.json)')
 
 
 
@@ -101,6 +108,8 @@ best_acc1 = 0
 
 def main():
     args = parser.parse_args()
+    os.makedirs(os.path.dirname(args.main_worker_epoch_log), exist_ok=True)
+    os.makedirs(os.path.dirname(args.train_epoch_log), exist_ok=True)
 
     if args.seed is not None:
         random.seed(args.seed)
@@ -302,6 +311,8 @@ def main_worker(gpu, ngpus_per_node, args):
         print("Validation completed.")
         return
 
+    training_logs = []
+    end = time.time()
     for epoch in range(args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
@@ -329,6 +340,20 @@ def main_worker(gpu, ngpus_per_node, args):
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
             }, is_best)
+
+        epoch_duration = time.time() - end
+        end = time.time()
+        # Log current epoch metrics
+        epoch_log = {
+            'epoch': epoch + 1,
+            'val_accuracy': acc1,
+            'val_best_accuracy': best_acc1,
+            'epoch_time': epoch_duration  # Average epoch time across all epochs
+        }
+        training_logs.append(epoch_log)  # Append to logs list
+
+    # Save all logs after training completes
+    save_logs_to_json(args.main_worker_epoch_log, training_logs)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, device, args):
@@ -380,7 +405,27 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
 
         if i % args.print_freq == 0:
             progress.display(i + 1)
+    # After each epoch, collect and save AverageMeter values
+    epoch_metrics = {
+        'epoch': epoch,
+        'batch_time': batch_time.sum,
+        'data_time': data_time.sum,
+        'loss': losses.avg,
+        'accuracy_top1': top1.avg.item(),
+        'accuracy_top5': top5.avg.item()
+    }
+    print(epoch_metrics)
 
+    # Append metrics to a JSON file (e.g., "epoch_log.json")
+    if epoch == 0:
+        epoch_logs = [epoch_metrics]  # Start new list on first epoch
+    else:
+        with open(args.train_epoch_log, 'r') as f:
+            epoch_logs = json.load(f)
+        epoch_logs.append(epoch_metrics)
+
+    with open(args.train_epoch_log, 'w') as f:
+        json.dump(epoch_logs, f, indent=4)
 
 
 def validate(val_loader, model, criterion, args):
@@ -549,6 +594,9 @@ def accuracy(output, target, topk=(1,)):
             res.append(correct_k.mul_(100.0 / batch_size))
         return res
 
-                
+def save_logs_to_json(filename, logs):
+    with open(filename, 'w') as json_file:
+        json.dump(logs, json_file, indent=4)
+
 if __name__ == '__main__':
     main()
