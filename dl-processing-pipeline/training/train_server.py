@@ -54,7 +54,7 @@ parser.add_argument('-a', '--arch', metavar='ARCH', default='resnet18',
                         ' (default: resnet18)')
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
-parser.add_argument('--epochs', default=10, type=int, metavar='N',
+parser.add_argument('--epochs', default=100, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
@@ -346,8 +346,8 @@ def main_worker(gpu, ngpus_per_node, args):
         # Log current epoch metrics
         epoch_log = {
             'epoch': epoch + 1,
-            'val_accuracy': acc1,
-            'val_best_accuracy': best_acc1,
+            'val_accuracy': acc1.item(),
+            'val_best_accuracy': best_acc1.item(),
             'epoch_time': epoch_duration  # Average epoch time across all epochs
         }
         training_logs.append(epoch_log)  # Append to logs list
