@@ -4,20 +4,27 @@ import grpc
 import data_feed_pb2
 import data_feed_pb2_grpc
 import torch
-from torchvision import datasets, transforms
-from torch.utils.data import Dataset
-import numpy as np
+from torchvision import transforms
 import os
 import zlib
-import time
 from io import BytesIO
 import argparse
 from utils import DecodeJPEG, ConditionalNormalize, ImagePathDataset
 import asyncio
+import logging
 
 from PIL import Image
+
 kill = mp.Event()  # Global event to signal termination
 num_cores = mp.cpu_count()
+
+LOGGER = logging.getLogger()
+DATA_LOGGER = logging.getLogger("data_collection")
+
+if os.environ.get("PROD") is None:
+    IMAGENET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imagenet")
+else:
+    IMAGENET_PATH = "/data/imagenet"
 
 def parse_args():
     """
@@ -35,6 +42,7 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=200, help='Batch size for loading images.')
     return parser.parse_args()
 
+
 def handle_termination(signum, frame):
     """
     Handles system termination signals by setting a global event `kill`,
@@ -43,13 +51,15 @@ def handle_termination(signum, frame):
     - `signum`: Signal number.
     - `frame`: Current stack frame (not used directly).
     """
-    print("Termination signal received. Stopping workers...")
+    LOGGER.info("Termination signal received. Stopping workers...")
     kill.set()  # Set the event to stop the fill_queue process
+
+
 class DataFeedService(data_feed_pb2_grpc.DataFeedServicer):
     """
     Implements the gRPC service for streaming batched image samples to a client.
     Manages interactions with a shared queue and applies offloading plans as requested.
-    
+
     Attributes:
         q (multiprocessing.Queue): Queue from which samples are retrieved.
         offloading_plan (dict): Cache storing the offloading plan for each sample ID.
@@ -62,15 +72,15 @@ class DataFeedService(data_feed_pb2_grpc.DataFeedServicer):
         """
         Asynchronous gRPC method to yield batched samples from a shared queue.
         Applies any requested transformations and compression to each sample.
-        
+
         Arguments:
             request: gRPC request object.
             context: gRPC context for the server.
         Yields:
             SampleBatch: Batch of samples formatted for gRPC transmission.
         """
-        
-        print("Server: Received request for samples") 
+
+        LOGGER.debug("Server: Received request for samples")
         while not kill.is_set():
             try:
                 # Attempt to retrieve the next sample batch
@@ -86,25 +96,25 @@ class DataFeedService(data_feed_pb2_grpc.DataFeedServicer):
                 ]
 
                 # Log the data types before yielding
-                print("Debug - Types in `get_samples` before yielding:")
-                print("  Type of image:", type(sample_batch[0][0]))  # Expect bytes
-                print("  Type of label:", type(sample_batch[0][1]))  # Expect bytes
-                print("  Type of transformations_applied:", type(sample_batch[0][2]))  # Expect bytes
-                print("  Type of is_compressed:", type(sample_batch[0][3]))  # Expect bytes
+                LOGGER.debug("Debug - Types in `get_samples` before yielding:")
+                LOGGER.debug("  Type of image: %s", type(sample_batch[0][0]))  # Expect bytes
+                LOGGER.debug("  Type of label: %s", type(sample_batch[0][1]))  # Expect bytes
+                LOGGER.debug("  Type of transformations_applied: %s", type(sample_batch[0][2]))  # Expect bytes
+                LOGGER.debug("  Type of is_compressed: %s", type(sample_batch[0][3]))  # Expect bytes
                 # Calculate and print the data size of sample_batch_proto
                 data_size = sum(len(sample.image) for sample in sample_batch_proto)
-                print(f"Data size of sample_batch_proto: {data_size} bytes")
+                LOGGER.debug(f"Data size of sample_batch_proto: {data_size} bytes")
 
                 # Yield the data in the expected gRPC format
                 yield data_feed_pb2.SampleBatch(samples=sample_batch_proto)
 
-            except Exception as e:
-                print(f"Server: Error while yielding samples: {e}")
+            except Exception:
+                LOGGER.error("Server: Error while yielding samples", exc_info=True)
                 break  # Exit on unrecoverable errors
 
 def fill_queue(q, kill, batch_size, dataset_path, offloading_plan, offloading_value, compression_value, worker_id):
     """
-    Loads image batches from the dataset, applies transformations based on offloading settings, 
+    Loads image batches from the dataset, applies transformations based on offloading settings,
     and enqueues them for streaming to clients. Handles optional compression.
 
     Arguments:
@@ -125,7 +135,7 @@ def fill_queue(q, kill, batch_size, dataset_path, offloading_plan, offloading_va
         transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),  # Converts PIL images to tensors
-        ConditionalNormalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]) 
+        ConditionalNormalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ]
 
     # Ensure that ImageFolder uses the transform to convert images to tensors
@@ -133,7 +143,7 @@ def fill_queue(q, kill, batch_size, dataset_path, offloading_plan, offloading_va
     loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
     while not kill.is_set():
         for batch_idx, (data, target) in enumerate(loader):
-            print(f"Worker {worker_id} - Batch {batch_idx}: Loaded {len(data)} images.")
+            LOGGER.info(f"Worker {worker_id} - Batch {batch_idx}: Loaded {len(data)} images.")
             sample_batch =[]
             for i, img in enumerate(data): # Loop over individual samples
                 sample_id = batch_idx * batch_size + i
@@ -142,10 +152,10 @@ def fill_queue(q, kill, batch_size, dataset_path, offloading_plan, offloading_va
                 elif offloading_value == 1:
                     num_transformations = 5
                 else:
-                    num_transformations = offloading_plan.get(sample_id, 0) 
+                    num_transformations = offloading_plan.get(sample_id, 0)
 
-                transformed_data = img  
-                for j in range(min(num_transformations, 5)):  
+                transformed_data = img
+                for j in range(min(num_transformations, 5)):
                     transformed_data = transformations[j](transformed_data)
 
                 # Serialize the transformed data
@@ -163,14 +173,14 @@ def fill_queue(q, kill, batch_size, dataset_path, offloading_plan, offloading_va
                     is_compressed = True
                 # time.sleep(1) this was used to simulare low network bandwidth but it is a crude proxy
                 label = int(target[i])  # Ensure label is an int32
-                
+
                 sample = (transformed_data, label, num_transformations, is_compressed)
                 sample_batch.append(sample)
             added = False
             while not added and not kill.is_set():
                 try:
                     q.put(sample_batch, timeout=1)
-                    # print(f"Worker {worker_id}: Successfully added sample {sample_id} to queue.")
+                    # LOGGER.info(f"Worker {worker_id}: Successfully added sample {sample_id} to queue.")
                     added = True
                 except:
                     continue
@@ -193,10 +203,22 @@ async def serve(offloading_value, compression_value, batch_size):
     # Start the fill_queue process
     workers = []
     for worker_id in range(num_cores):
-        p = mp.Process(target=fill_queue, args=(q, kill, batch_size, 'imagenet', offloading_plan, offloading_value, compression_value, worker_id))
+        p = mp.Process(
+            target=fill_queue,
+            args=(
+                q,
+                kill,
+                batch_size,
+                IMAGENET_PATH,
+                offloading_plan,
+                offloading_value,
+                compression_value,
+                worker_id,
+            ),
+        )
         workers.append(p)
         p.start()
-    
+
     # Start the gRPC server
     server = grpc.aio.server(
         futures.ThreadPoolExecutor(max_workers=8),
@@ -216,15 +238,16 @@ async def serve(offloading_value, compression_value, batch_size):
     server.add_insecure_port('[::]:50051')
     await server.start()
     await server.wait_for_termination()
-    
+
     kill.set()
     for p in workers:
         p.join()
 
+
 def custom_collate_fn(batch):
     """
     Custom collate function for the DataLoader, reading raw images (instead of auto encoding to PIL Image object) and targets from disk.
-    
+
     Arguments:
         batch (list): List of tuples with image paths and labels.
     Returns:
@@ -237,7 +260,6 @@ def custom_collate_fn(batch):
             raw_img_data = f.read()  # Read the raw JPEG image in binary
         raw_images.append(raw_img_data)
         targets.append(target)
-    
     return raw_images, targets  # Return two lists: images and targets
 
 
@@ -247,10 +269,10 @@ if __name__ == '__main__':
     the asynchronous data feed server with the specified configuration.
     """
     args = parse_args()
-    
+
     # Example usage of the --offloading argument
     offloading_value = args.offloading
     compression_value = args.compression
     batch_size = args.batch_size
     asyncio.run(serve(args.offloading, args.compression, args.batch_size))
-    
+

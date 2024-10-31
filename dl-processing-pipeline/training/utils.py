@@ -11,30 +11,31 @@ import torch.utils.data
 import os
 from torch.utils.data import Dataset, DataLoader
 import time
+import json
+import logging
+from logging.config import dictConfig
 
-import cProfile
-import pstats
-import io
+LOGGER = logging.getLogger()
 
 class DecodeJPEG:
     """
     Decodes raw JPEG byte data into a PIL image.
-    
+
     Methods:
         __call__(raw_bytes): Accepts raw JPEG bytes and returns a PIL Image object.
     """
     def __call__(self, raw_bytes):
         return Image.open(BytesIO(raw_bytes))
-    
+
 class ConditionalNormalize:
     """
-    Conditionally normalizes tensors representing images, adjusting single-channel images 
+    Conditionally normalizes tensors representing images, adjusting single-channel images
     to three-channel (RGB) by repeating channels if necessary.
-    
+
     Attributes:
         mean (list): Mean values for normalization across RGB channels.
         std (list): Standard deviation values for normalization across RGB channels.
-        
+
     Methods:
         __call__(tensor): Applies normalization if the tensor is three-channel.
     """
@@ -45,14 +46,14 @@ class ConditionalNormalize:
         # Only apply normalization if the tensor has 3 channels
         if tensor.shape[0] == 1:
             tensor = tensor.repeat(3, 1, 1)  # Repeat the single channel across the 3 RGB channels
-        
+
         # Apply normalization to 3-channel (RGB) images
         return self.normalize(tensor)
 
 class RemoteDataset(torch.utils.data.IterableDataset):
     """
-    Streams image data from a remote gRPC server, applying specified transformations and 
-    optional decompression for each sample. Manages communication with the server and 
+    Streams image data from a remote gRPC server, applying specified transformations and
+    optional decompression for each sample. Manages communication with the server and
     yields image batches for training.
 
     Attributes:
@@ -61,21 +62,21 @@ class RemoteDataset(torch.utils.data.IterableDataset):
         batch_size (int): Number of images per batch.
 
     Methods:
-        __iter__(): Connects to the gRPC server and iteratively requests image batches, 
+        __iter__(): Connects to the gRPC server and iteratively requests image batches,
                     yielding decompressed and preprocessed samples.
-        preprocess_sample(sample, transformations_applied): Applies a series of transformations 
+        preprocess_sample(sample, transformations_applied): Applies a series of transformations
                     based on specified settings, preparing the image for model input.
     """
     def __init__(self, host, port, batch_size=256):
         self.host = host
         self.port = port
         self.batch_size = batch_size
-        print(f"Initialized RemoteDataset with host={self.host}, port={self.port}, batch_size={self.batch_size}")
+        LOGGER.info(f"Initialized RemoteDataset with host={self.host}, port={self.port}, batch_size={self.batch_size}")
 
     def __iter__(self):
-        print("Starting RemoteDataset __iter__")
-        
-        
+        LOGGER.info("Starting RemoteDataset __iter__")
+
+
         try:
             connect_start = time.time()
             channel = grpc.insecure_channel(
@@ -95,13 +96,13 @@ class RemoteDataset(torch.utils.data.IterableDataset):
             sample_stream = stub.get_samples(config_request)
             batch_start = time.time()
             batch_time = 0
-            
 
-            # print("Requesting data with batch size:", self.batch_size)
-            
+
+            # LOGGER.debug("Requesting data with batch size: %s", self.batch_size)
+
             batch_images = []
             batch_labels = []
-            
+
             for sample_batch in sample_stream:
                 for sample in sample_batch.samples:
                     decompress_start = time.time()
@@ -110,11 +111,11 @@ class RemoteDataset(torch.utils.data.IterableDataset):
                     if sample.is_compressed:
                         img_data = zlib.decompress(img_data)
                     decompress_end = time.time()
-                    # print(f"Decompression time: {decompress_end - decompress_start:.4f} seconds")
+                    # LOGGER.debug(f"Decompression time: {decompress_end - decompress_start:.4f} seconds")
                     # Convert img_data to tensor and add to batch
                     img_tensor = self.preprocess_sample(img_data, sample.transformations_applied)
 
-                    # print(f"Transformation time: {transform_end - transform_start:.4f} seconds")
+                    # LOGGER.debug(f"Transformation time: {transform_end - transform_start:.4f} seconds")
 
                     batch_images.append(img_tensor)
                     batch_labels.append(torch.tensor(sample.label))
@@ -125,13 +126,13 @@ class RemoteDataset(torch.utils.data.IterableDataset):
                         batch_end = time.time()
                         batch_time = batch_end - batch_start
                         batch_start = time.time()
-                        # print(f"Yielded a batch of size: {self.batch_size} in {batch_time:.4f} seconds")
+                        # LOGGER.debug(f"Yielded a batch of size: {self.batch_size} in {batch_time:.4f} seconds")
                         batch_images = []
                         batch_labels = []
-                        # print(f"Yielded a batch of size: {self.batch_size}")
+                        # LOGGER.debug(f"Yielded a batch of size: {self.batch_size}")
 
-        except Exception as e:
-            print(f"Unexpected error in RemoteDataset __iter__: {e}")
+        except Exception:
+            LOGGER.error("Unexpected error in RemoteDataset __iter__", exc_info=True)
 
 
     def preprocess_sample(self, sample, transformations_applied):
@@ -155,8 +156,8 @@ class RemoteDataset(torch.utils.data.IterableDataset):
                 sample = torch.from_numpy(img_array.reshape(3, 224, 224))
             # List of transformations to apply individually
             decode_jpeg = DecodeJPEG()
-            
-            
+
+
             transformations = [
                 decode_jpeg,  # Decode raw JPEG bytes to a PIL image
                 transforms.RandomResizedCrop(224),
@@ -169,14 +170,15 @@ class RemoteDataset(torch.utils.data.IterableDataset):
             for i in range(transformations_applied, len(transformations)):
                 if transformations[i] is not None:
                     processed_sample = transformations[i](processed_sample)
-        except Exception as e:
-            print(f"Error in preprocess_sample: {e}")
+        except Exception:
+            LOGGER.error("Error in preprocess_sample", exc_info=True)
             return None
         return processed_sample
 
+
 class ImagePathDataset(Dataset):
     """
-    Custom Dataset class that reads image file paths from a directory structure and assigns 
+    Custom Dataset class that reads image file paths from a directory structure and assigns
     labels based on directory names. Useful for loading data without immediately reading images.
 
     Attributes:
@@ -210,7 +212,7 @@ class ImagePathDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
         target = self.targets[idx]
-        
+
         return img_path, target  # Only return two values: path and target
 
 
@@ -228,16 +230,16 @@ if __name__ == '__main__':
     start_time = time.time()
     batch_time_start = time.time()
     for i, (images, target) in enumerate(train_loader):
-        
+
         batch_size = images.shape[0]  # Current batch size (could vary depending on availability)
         total_images += batch_size
 
         # Flatten the nested batches into a single batch dimension
-        # print(f"Batch {i}: Loaded {batch_size} images. Total loaded so far: {total_images}")
+        # LOGGER.debug(f"Batch {i}: Loaded {batch_size} images. Total loaded so far: {total_images}")
         images = images.view(-1, 3, 224, 224)  # Flatten: (2, 2, 3, 224, 224) -> (4, 3, 224, 224)
         target = target.view(-1)  # Adjust target as well
         batch_time_end = time.time()
-        # print(f"Batch {i}: Loaded {batch_size} images in {batch_time_end - batch_time_start:.4f} seconds")
+        # LOGGER.debug(f"Batch {i}: Loaded {batch_size} images in {batch_time_end - batch_time_start:.4f} seconds")
         batch_time_start = time.time()
 
         # Stop if we've loaded 1000 images
@@ -246,14 +248,37 @@ if __name__ == '__main__':
             elapsed_time = end_time - start_time
             throughput = total_images / elapsed_time  # Images per second
 
-            print(f"Loaded {total_images} images in {elapsed_time:.2f} seconds. Throughput: {throughput:.2f} images/second")
+            LOGGER.debug(f"Loaded {total_images} images in {elapsed_time:.2f} seconds. Throughput: {throughput:.2f} images/second")
             # profiler.disable()
             # stream = io.StringIO()
             # stats = pstats.Stats(profiler, stream=stream).sort_stats('cumulative')
             # stats.print_stats(20)  # Display top 20 time-consuming functions
-            # print(stream.getvalue())
+            # LOGGER.debug(stream.getvalue())
             break
-    
+
 
     # Measure end time and calculate throughput
-    
+
+def load_logging_config():
+    """
+    Loads the logging configuration from a JSON file and applies it.
+
+    This function reads a JSON configuration file for logging, modifies
+    file handler paths if not in production, and applies the configuration
+    using dictConfig from the logging module.
+
+    If the 'PROD' environment variable is not set,
+    the file paths for handlers are overridden to point to local log files.
+
+    """
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    log_config = os.path.join(base_path, "logging.json")
+
+    with open(log_config, 'r') as read_file:
+        config = json.load(read_file)
+
+    if os.environ.get("PROD") is None:
+        config["handlers"]["file"]["filename"] = os.path.join(base_path, 'logs/debug_logs.log')
+        config["handlers"]["data_collection_handler"]["filename"] = os.path.join(base_path, 'logs/data_log.log')
+
+    dictConfig(config)
