@@ -79,7 +79,7 @@ class MetricsCollector:
     def stop(self):
         self.running = False
         self.collection_thread.join()
-
+    #write them to rpc call and send them to algorithm -> selective algorithm Rafael
     def _collect_metrics(self):
         last_disk_io = psutil.disk_io_counters()
         last_net_io = psutil.net_io_counters()
