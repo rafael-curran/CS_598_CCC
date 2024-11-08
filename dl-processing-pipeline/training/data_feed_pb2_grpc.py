@@ -38,12 +38,23 @@ class DataFeedStub(object):
                 request_serializer=data__feed__pb2.Config.SerializeToString,
                 response_deserializer=data__feed__pb2.SampleBatch.FromString,
                 _registered_method=True)
+        self.update_offloading_plan = channel.unary_unary(
+                '/DataFeed/update_offloading_plan',
+                request_serializer=data__feed__pb2.OffloadingRequest.SerializeToString,
+                response_deserializer=data__feed__pb2.Response.FromString,
+                _registered_method=True)
 
 
 class DataFeedServicer(object):
     """Missing associated documentation comment in .proto file."""
 
     def get_samples(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+    def update_offloading_plan(self, request, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -56,6 +67,11 @@ def add_DataFeedServicer_to_server(servicer, server):
                     servicer.get_samples,
                     request_deserializer=data__feed__pb2.Config.FromString,
                     response_serializer=data__feed__pb2.SampleBatch.SerializeToString,
+            ),
+            'update_offloading_plan': grpc.unary_unary_rpc_method_handler(
+                    servicer.update_offloading_plan,
+                    request_deserializer=data__feed__pb2.OffloadingRequest.FromString,
+                    response_serializer=data__feed__pb2.Response.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -85,6 +101,33 @@ class DataFeed(object):
             '/DataFeed/get_samples',
             data__feed__pb2.Config.SerializeToString,
             data__feed__pb2.SampleBatch.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def update_offloading_plan(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/DataFeed/update_offloading_plan',
+            data__feed__pb2.OffloadingRequest.SerializeToString,
+            data__feed__pb2.Response.FromString,
             options,
             channel_credentials,
             insecure,

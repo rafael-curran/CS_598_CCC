@@ -2,6 +2,7 @@ syntax = "proto3";
 
 service DataFeed {
     rpc get_samples(Config) returns (stream SampleBatch) {}
+    rpc update_offloading_plan(OffloadingRequest) returns (Response) {} 
 }
 
 message Config {
@@ -11,16 +12,21 @@ message Config {
 message OffloadingRequest {
     int32 sample_id = 1;        // The ID of the sample
     int32 transformations = 2;  // The number of transformations to apply (0 = raw)
+    bool compress = 3;           // Indicates if the sample should be compressed
 }
 
 message Sample {
-    bytes image = 1;                  // Compressed image data
-    int32 label = 2;                  // Compressed label data
-    int32 transformations_applied = 3; // Number of transformations applied to the sample
-    bool is_compressed = 4;           // Indicates if the sample is compressed
+    int32 id = 1;
+    bytes image = 2;                  // Compressed image data
+    int32 label = 3;                  // Compressed label data
+    int32 transformations_applied = 4; // Number of transformations applied to the sample
+    bool is_compressed = 5;           // Indicates if the sample is compressed
 }
 
 message SampleBatch {
     repeated Sample samples = 1;
 }
 
+message Response {
+    string status = 1; // Response status message
+}

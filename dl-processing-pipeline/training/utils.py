@@ -17,6 +17,12 @@ from logging.config import dictConfig
 
 LOGGER = logging.getLogger()
 
+import cProfile
+import pstats
+import io
+
+import hashlib
+
 class DecodeJPEG:
     """
     Decodes raw JPEG byte data into a PIL image.
@@ -105,12 +111,10 @@ class RemoteDataset(torch.utils.data.IterableDataset):
 
             for sample_batch in sample_stream:
                 for sample in sample_batch.samples:
-                    decompress_start = time.time()
                     # Deserialize image data
                     img_data = sample.image
                     if sample.is_compressed:
                         img_data = zlib.decompress(img_data)
-                    decompress_end = time.time()
                     # LOGGER.debug(f"Decompression time: {decompress_end - decompress_start:.4f} seconds")
                     # Convert img_data to tensor and add to batch
                     img_tensor = self.preprocess_sample(img_data, sample.transformations_applied)
@@ -212,9 +216,51 @@ class ImagePathDataset(Dataset):
     def __getitem__(self, idx):
         img_path = self.image_paths[idx]
         target = self.targets[idx]
+        
+        return img_path, target
+    
+    
+def encode_p(img: Image, fmt: str = "JPEG", quality: int = 80) -> bytes:
+    """
+    Compresses an image in-memory using Pillow and returns the compressed data as bytes.
+    
+    Parameters:
+    - img (Image): The PIL image to compress.
+    - fmt (str): Compression format (e.g., 'JPEG', 'JPEG2000', 'WebP').
+    - quality (int): Quality level for the compression, default is 80.
+    
+    Returns:
+    - bytes: The compressed image as bytes.
+    """
+    # Prepare a BytesIO stream to hold the in-memory compressed image
+    output = BytesIO()
+    
+    # Apply compression based on the format
+    if fmt == "JPEG":
+        img.save(output, format="JPEG", quality=quality)
+    elif fmt == "JPEG2000":
+        img.save(output, format="JPEG2000", quality_mode="rates")
+    elif fmt == "WebP":
+        img.save(output, format="WebP", quality=quality)
+    else:
+        raise ValueError(f"Unsupported format: {fmt}")
+    
+    # Get the byte data from the BytesIO stream
+    compressed_data = output.getvalue()
+    output.close()
+    
+    return compressed_data
 
-        return img_path, target  # Only return two values: path and target
-
+def custom_collate_fn(batch):
+    raw_images = []
+    targets = []
+    for img_path, target in batch:
+        with open(img_path, 'rb') as f:
+            raw_img_data = f.read()  # Read the raw JPEG image in binary
+        raw_images.append(raw_img_data)
+        targets.append(target)
+    
+    return raw_images, targets  # Return two lists: images and targets
 
 if __name__ == '__main__':
     # profiler = cProfile.Profile()

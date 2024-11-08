@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0f\x64\x61ta_feed.proto\"\x1c\n\x06\x43onfig\x12\x12\n\nbatch_size\x18\x01 \x01(\x05\"?\n\x11OffloadingRequest\x12\x11\n\tsample_id\x18\x01 \x01(\x05\x12\x17\n\x0ftransformations\x18\x02 \x01(\x05\"^\n\x06Sample\x12\r\n\x05image\x18\x01 \x01(\x0c\x12\r\n\x05label\x18\x02 \x01(\x05\x12\x1f\n\x17transformations_applied\x18\x03 \x01(\x05\x12\x15\n\ris_compressed\x18\x04 \x01(\x08\"\'\n\x0bSampleBatch\x12\x18\n\x07samples\x18\x01 \x03(\x0b\x32\x07.Sample24\n\x08\x44\x61taFeed\x12(\n\x0bget_samples\x12\x07.Config\x1a\x0c.SampleBatch\"\x00\x30\x01\x62\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0f\x64\x61ta_feed.proto\"\x1c\n\x06\x43onfig\x12\x12\n\nbatch_size\x18\x01 \x01(\x05\"Q\n\x11OffloadingRequest\x12\x11\n\tsample_id\x18\x01 \x01(\x05\x12\x17\n\x0ftransformations\x18\x02 \x01(\x05\x12\x10\n\x08\x63ompress\x18\x03 \x01(\x08\"j\n\x06Sample\x12\n\n\x02id\x18\x01 \x01(\x05\x12\r\n\x05image\x18\x02 \x01(\x0c\x12\r\n\x05label\x18\x03 \x01(\x05\x12\x1f\n\x17transformations_applied\x18\x04 \x01(\x05\x12\x15\n\ris_compressed\x18\x05 \x01(\x08\"\'\n\x0bSampleBatch\x12\x18\n\x07samples\x18\x01 \x03(\x0b\x32\x07.Sample\"\x1a\n\x08Response\x12\x0e\n\x06status\x18\x01 \x01(\t2o\n\x08\x44\x61taFeed\x12(\n\x0bget_samples\x12\x07.Config\x1a\x0c.SampleBatch\"\x00\x30\x01\x12\x39\n\x16update_offloading_plan\x12\x12.OffloadingRequest\x1a\t.Response\"\x00\x62\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,11 +34,13 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_CONFIG']._serialized_start=19
   _globals['_CONFIG']._serialized_end=47
   _globals['_OFFLOADINGREQUEST']._serialized_start=49
-  _globals['_OFFLOADINGREQUEST']._serialized_end=112
-  _globals['_SAMPLE']._serialized_start=114
-  _globals['_SAMPLE']._serialized_end=208
-  _globals['_SAMPLEBATCH']._serialized_start=210
-  _globals['_SAMPLEBATCH']._serialized_end=249
-  _globals['_DATAFEED']._serialized_start=251
-  _globals['_DATAFEED']._serialized_end=303
+  _globals['_OFFLOADINGREQUEST']._serialized_end=130
+  _globals['_SAMPLE']._serialized_start=132
+  _globals['_SAMPLE']._serialized_end=238
+  _globals['_SAMPLEBATCH']._serialized_start=240
+  _globals['_SAMPLEBATCH']._serialized_end=279
+  _globals['_RESPONSE']._serialized_start=281
+  _globals['_RESPONSE']._serialized_end=307
+  _globals['_DATAFEED']._serialized_start=309
+  _globals['_DATAFEED']._serialized_end=420
 # @@protoc_insertion_point(module_scope)

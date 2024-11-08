@@ -9,7 +9,10 @@ import zlib
 import sys
 from io import BytesIO
 from PIL import Image
-from utils import DecodeJPEG, ConditionalNormalize
+import os
+import heapq
+from decision_engine import DecisionEngine
+from utils import DecodeJPEG, ConditionalNormalize, RemoteDataset, ImagePathDataset, encode_p
 import torchvision.models as models
 import torch.nn as nn
 from utils import load_logging_config
@@ -118,9 +121,7 @@ class Profiler:
                 decompressed_image = s.image
 
             if s.transformations_applied < 5:
-                processed_image, _, _ = self.preprocess_sample(
-                    decompressed_image, s.transformations_applied
-                )
+                processed_image, _, _ ,_,_= self.preprocess_sample(decompressed_image, s.transformations_applied)
             else:
                 img_np = np.frombuffer(decompressed_image, dtype=np.float32)
                 img_np = img_np.reshape((3, 224, 224))
@@ -130,9 +131,9 @@ class Profiler:
             num_samples_cpu += 1
 
         cpu_time = time.time() - start
-        LOGGER.info("CPU Time:", cpu_time)
-        LOGGER.info("Num Samples CPU:", num_samples_cpu)
-        LOGGER.info("Sample Metrics:", sample_metrics)
+        LOGGER.info(f"CPU Time: {cpu_time}")
+        LOGGER.info(f"Num Samples CPU: {num_samples_cpu}")
+        LOGGER.info(f"Sample Metrics: {sample_metrics}")
         cpu_throughput = num_samples_cpu / cpu_time
 
         return gpu_throughput, io_throughput, cpu_throughput
@@ -155,21 +156,28 @@ class Profiler:
         sample_metrics = []
         for sample_batch in sample_stream:
             for i, sample in enumerate(sample_batch.samples):
-
                 original_size = len(sample.image) if isinstance(sample.image, bytes) else sample.image.nelement() * sample.image.element_size()
-
+                img_data = sample.image
+                if sample.is_compressed:
+                    img_data = zlib.decompress(img_data)
                 # Process the sample and record metrics
                 if isinstance(sample.image, bytes):
-                    transformed_data, times_per_transformation, transformed_sizes_per_transformation = self.preprocess_sample(sample.image, sample.transformations_applied)
+                    transformed_data, times_per_transformation, transformed_sizes_per_transformation, compressed_sizes, compression_times = self.preprocess_sample(img_data, sample.transformations_applied)
                 elif isinstance(sample.image, torch.Tensor):
-                    transformed_data, times_per_transformation, transformed_sizes_per_transformation = self.preprocess_sample(sample.image, sample.transformations_applied)
-
+                    transformed_data, times_per_transformation, transformed_sizes_per_transformation, compressed_sizes, compression_times = self.preprocess_sample(img_data, sample.transformations_applied)
+                
+                # Append the metrics for this sample
                 sample_metrics.append({
+                    'sample_id': sample.id,
                     'original_size': original_size,
                     'transformed_sizes': transformed_sizes_per_transformation,
-                    'preprocessing_times': times_per_transformation
+                    'preprocessing_times': times_per_transformation,
+                    'compressed_sizes': compressed_sizes,
+                    'compression_times': compression_times
                 })
-                if len( sample_metrics) >= 10:
+                
+                # Limit the number of samples to 100 for testing
+                if len(sample_metrics) >= 100:
                     return sample_metrics
 
     def preprocess_sample(self, sample, transformations_applied):
@@ -177,13 +185,13 @@ class Profiler:
         # LOGGER.debug(f"Debug - preprocess_sample: Data type of sample: {type(sample)}, Transformations applied: {transformations_applied}")
 
         try:
-
+            # Decode the image based on transformations applied
             if 0 < transformations_applied <= 3:
                 sample = Image.open(BytesIO(sample)).convert('RGB')
             elif transformations_applied > 3:
                 img_array = np.frombuffer(sample, dtype=np.float32).copy()
-                # Reshape based on expected image shape, e.g., (3, 224, 224) for RGB images
                 sample = torch.from_numpy(img_array.reshape(3, 224, 224))
+
             decode_jpeg = DecodeJPEG()  # Assuming this is a method of the class
 
             transformations = [
@@ -195,61 +203,116 @@ class Profiler:
             ]
 
             processed_sample = sample
-            sizes = []
-            times = []
+            transformed_sizes = []
+            preprocessing_times = []
+            compressed_sizes = []
+            compression_times = []
 
             # Apply transformations starting from the index `transformations_applied`
             for i in range(transformations_applied, len(transformations)):
                 transform = transformations[i]
+                
+                # Measure preprocessing time
+                start_time = time.time()
+                processed_sample = transform(processed_sample)
+                elapsed_time = time.time() - start_time
+                preprocessing_times.append(elapsed_time)
 
-                if transform is not None:
-                    start_time = time.time()
-                    processed_sample = transform(processed_sample)  # Apply transformation
-                    elapsed_time = time.time() - start_time
-                    times.append(elapsed_time)  # Record the time for each transformation
-                else:
-                    times.append(0)  # No-op for None transformations
-
-                # Calculate size after the transformation
+                # Measure transformed size
                 if isinstance(processed_sample, torch.Tensor):
-                    # For PyTorch tensors
                     data_size = processed_sample.nelement() * processed_sample.element_size()
                 elif isinstance(processed_sample, np.ndarray):
-                    # For NumPy arrays
                     data_size = processed_sample.nbytes
                 elif isinstance(processed_sample, Image.Image):
-                    # For PIL images
-                    data_size = len(processed_sample.tobytes())  # Convert to bytes and measure length
+                    data_size = len(processed_sample.tobytes())
                 else:
-                    # Fallback to sys.getsizeof for other types
                     data_size = sys.getsizeof(processed_sample)
+                transformed_sizes.append(data_size)
 
-                sizes.append(data_size)
-        except Exception:
-            LOGGER.error("Error in preprocess_sample", exc_info=True)
-        # LOGGER.info("Transformation Times:", times)
-        return processed_sample, times, sizes
+                # Measure compressed size and compression time
+                start_time = time.time()
+                if isinstance(processed_sample, torch.Tensor):
+                    data_bytes = processed_sample.numpy().tobytes()
+                elif isinstance(processed_sample, np.ndarray):
+                    data_bytes = processed_sample.tobytes()
+                elif isinstance(processed_sample, Image.Image):
+                    img_byte_arr = BytesIO()
+                    processed_sample.save(img_byte_arr, format='JPEG')
+                    data_bytes = img_byte_arr.getvalue()
+                else:
+                    data_bytes = bytes(processed_sample)
+                    
+                compressed_data = zlib.compress(data_bytes)
+                compression_time = time.time() - start_time
+                compression_times.append(compression_time)
+                compressed_sizes.append(len(compressed_data))
+
+        except Exception as e:
+            print("Error in preprocess_sample:", e)
+            print("Stack trace:", sys.exc_info())
+
+        return processed_sample, preprocessing_times, transformed_sizes, compressed_sizes, compression_times
 
     def run_profiling(self):
         # Stage 1: Basic throughput analysis
         gpu_throughput, io_throughput, cpu_preprocessing_throughput = (
             self.stage_one_profiling()
         )
-        LOGGER.info("GPU Throughput:", gpu_throughput)
-        LOGGER.info("I/O Throughput:", io_throughput)
-        LOGGER.info("CPU Preprocessing Throughput:", cpu_preprocessing_throughput)
-        if io_throughput < cpu_preprocessing_throughput:
-            # Stage 2: Detailed sample-specific profiling
-            return gpu_throughput, io_throughput, cpu_preprocessing_throughput, self.stage_two_profiling()
-        return gpu_throughput, io_throughput, cpu_preprocessing_throughput, None
+        LOGGER.info(f"GPU Throughput: {gpu_throughput}")
+        LOGGER.info(f"I/O Throughput: {io_throughput}")
+        LOGGER.info(f"CPU Preprocessing Throughput: {cpu_preprocessing_throughput}")
+        # if io_throughput < cpu_preprocessing_throughput:
+        #     # Stage 2: Detailed sample-specific profiling
+        #     return gpu_throughput, io_throughput, cpu_preprocessing_throughput, self.stage_two_profiling()
+        # return gpu_throughput, io_throughput, cpu_preprocessing_throughput, None
+        return gpu_throughput, io_throughput, cpu_preprocessing_throughput, self.stage_two_profiling()
+
+    def compress_with_zlib(self, tensor: torch.Tensor) -> bytes:
+        """
+        Compresses a tensor using zlib after converting it to bytes.
+        
+        Parameters:
+        - tensor (torch.Tensor): The tensor to compress.
+        
+        Returns:
+        - bytes: Compressed byte representation of the tensor.
+        """
+        # Convert tensor to a byte array
+        byte_data = tensor.numpy().tobytes()
+        
+        # Compress with zlib
+        compressed_data = zlib.compress(byte_data)
+        return compressed_data
+
+
+    def decompress_with_zlib(self, compressed_data: bytes) -> torch.Tensor:
+        """
+        Decompresses zlib-compressed byte data and converts it back to a tensor.
+        
+        Parameters:
+        - compressed_data (bytes): The zlib-compressed byte data.
+        
+        Returns:
+        - torch.Tensor: Decompressed tensor.
+        """
+        # Decompress the byte data
+        decompressed_data = zlib.decompress(compressed_data)
+        
+        # Convert back to a numpy array, then to a tensor
+        img_array = np.frombuffer(decompressed_data, dtype=np.float32).reshape(3, 224, 224)
+        return torch.tensor(img_array)
 
 
 if __name__ == '__main__':
     load_logging_config()
     profiler = Profiler(batch_size=200, dataset_path='imagenet', grpc_host='localhost', grpc_port=50051)
     gpu_throughput, io_throughput, cpu_preprocessing_throughput, sample_metrics = profiler.run_profiling()
-    LOGGER.info("Sample Metrics:", sample_metrics)
-    # if sample_metrics:  # If the profiler identifies an I/O bottleneck
-    #     decision_engine = DecisionEngine(sample_metrics, gpu_t = gpu_throughput, cpu_t =cpu_preprocessing_throughput, io_t = io_throughput,  cpu_cores_compute=1, cpu_cores_storage=8, grpc_host='localhost', grpc_port=50051)
-    #     offloading_plan = decision_engine.iterative_offloading()
-    #     LOGGER.info(offloading_plan)
+    #estimate io_bandwidth by sum of original sizes and io_throughput
+    io_bandwidth = 82100000
+    LOGGER.info(f"IO Bandwidth: {io_bandwidth}")
+    # print("Sample Metrics:", sample_metrics)
+    if sample_metrics:  # If the profiler identifies an I/O bottleneck
+        decision_engine = DecisionEngine(sample_metrics,  io_bandwidth= io_bandwidth,  cpu_cores_compute=1, cpu_cores_storage=8, grpc_host='localhost', grpc_port=50051)
+        offloading_plan = decision_engine.send_offloading_requests()
+        print(offloading_plan)
+
