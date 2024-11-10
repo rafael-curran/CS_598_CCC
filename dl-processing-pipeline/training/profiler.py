@@ -177,7 +177,7 @@ class Profiler:
                 })
                 
                 # Limit the number of samples to 100 for testing
-                if len(sample_metrics) >= 100:
+                if len(sample_metrics) >= 10000:
                     return sample_metrics
 
     def preprocess_sample(self, sample, transformations_applied):
