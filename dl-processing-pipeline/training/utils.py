@@ -14,6 +14,8 @@ import time
 import json
 import logging
 from logging.config import dictConfig
+from typing import List, Tuple, Callable, Optional
+from torch.utils.data import get_worker_info
 
 LOGGER = logging.getLogger()
 
@@ -31,7 +33,7 @@ class DecodeJPEG:
         __call__(raw_bytes): Accepts raw JPEG bytes and returns a PIL Image object.
     """
     def __call__(self, raw_bytes):
-        return Image.open(BytesIO(raw_bytes))
+        return Image.open(BytesIO(raw_bytes)).convert('RGB')
 
 class ConditionalNormalize:
     """
@@ -127,6 +129,10 @@ class RemoteDataset(torch.utils.data.IterableDataset):
                     # Yield a batch when it reaches the desired batch size
                     if len(batch_images) == self.batch_size:
                         yield torch.stack(batch_images), torch.stack(batch_labels)
+                        # print(f"Batch images dimensions: {torch.stack(batch_images).shape}")
+                        # print(f"First entry values: {torch.stack(batch_images)[0]}")
+                        # print(f"Batch labels dimensions: {torch.stack(batch_labels).shape}")
+                        # print(f"First label value: {torch.stack(batch_labels)[0]}")
                         batch_end = time.time()
                         batch_time = batch_end - batch_start
                         batch_start = time.time()
@@ -187,37 +193,61 @@ class ImagePathDataset(Dataset):
 
     Attributes:
         root_dir (str): Root directory of the dataset with subdirectories for each class.
-        transform (callable): Optional transform to apply to each image.
         image_paths (list): List of image file paths.
         targets (list): List of labels corresponding to each image path.
+        classes (list): List of class names.
+        class_to_idx (dict): Dictionary mapping class names to indices.
+        samples (list): List of (image_path, target) tuples.
 
     Methods:
         __len__(): Returns the total number of images in the dataset.
-        __getitem__(idx): Returns the image path and corresponding label for the specified index.
+        __getitem__(idx): Returns the image bytes and corresponding label for the specified index.
     """
-    def __init__(self, root_dir, transform=None):
+
+    def __init__(self, root_dir: str, loader: Optional[Callable[[str], bytes]] = None):
         self.root_dir = root_dir
-        self.transform = transform
         self.image_paths = []
         self.targets = []
+        self.classes = []
+        self.class_to_idx = {}
+        self.samples = []
+        # self.loader = loader if loader is not None else self.default_loader
 
         # Traverse the directory structure and collect image paths and targets
-        for class_idx, class_name in enumerate(os.listdir(root_dir)):
+        class_names = sorted(os.listdir(root_dir))
+        self.classes = class_names
+        self.class_to_idx = {class_name: idx for idx, class_name in enumerate(class_names)}
+        # print(f"Class names: {class_names}")
+
+        for class_name in class_names:
+            class_idx = self.class_to_idx[class_name]
             class_dir = os.path.join(root_dir, class_name)
             if os.path.isdir(class_dir):
-                for img_name in os.listdir(class_dir):
+                for img_name in sorted(os.listdir(class_dir)):
                     img_path = os.path.join(class_dir, img_name)
                     self.image_paths.append(img_path)
                     self.targets.append(class_idx)
+                    self.samples.append((img_path, class_idx))
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.image_paths)
 
     def __getitem__(self, idx):
+        # worker_info = get_worker_info()
+        # if worker_info is not None:
+        #     # Split dataset among workers
+        #     num_workers = worker_info.num_workers
+        #     worker_id = worker_info.id
+        #     # Determine the subset of indices for this worker
+        #     per_worker = len(self.image_paths) // num_workers
+        #     worker_start = worker_id * per_worker
+        #     worker_end = worker_start + per_worker
+        #     idx = (idx % per_worker) + worker_start
+
         img_path = self.image_paths[idx]
         target = self.targets[idx]
-        
         return img_path, target
+        
     
     
 def encode_p(img: Image, fmt: str = "JPEG", quality: int = 80) -> bytes:
@@ -328,3 +358,32 @@ def load_logging_config():
         config["handlers"]["data_collection_handler"]["filename"] = os.path.join(base_path, 'logs/data_log.log')
 
     dictConfig(config)
+
+def custom_collate_fn(batch):
+    """
+    Custom collate function for the DataLoader, reading raw images (instead of auto encoding to PIL Image object) and targets from disk.
+    
+    Arguments:
+        batch (list): List of tuples with image paths and labels.
+    Returns:
+        tuple: Three lists - raw images as binary data and their corresponding targets and id's.
+    """
+    raw_images = []
+    targets = []
+    sample_ids = []
+    for img_path, target in batch:
+        with open(img_path, 'rb') as f:
+            raw_img_data = f.read()  # Read the raw JPEG image in binary
+        raw_images.append(raw_img_data)
+        targets.append(target)
+        sample_ids.append(generate_id(img_path))
+        # print(f"Loaded image {img_path} with target {target}")
+    
+    return raw_images, targets, sample_ids  # Return two lists: images and targets
+
+@staticmethod
+def generate_id(filename):
+    """Generate a unique integer ID based on the file name."""
+    # Hash the file name and convert to an integer for a stable ID
+    hash_object = hashlib.md5(filename.encode())
+    return int(hash_object.hexdigest(), 16) % (10 ** 8)

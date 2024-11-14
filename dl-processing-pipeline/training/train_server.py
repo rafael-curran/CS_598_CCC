@@ -23,20 +23,13 @@ import torchvision.transforms as transforms
 from torch.utils.data import Subset
 import logging
 from profiler import Profiler  # Assuming the profiler is in a separate file
-from utils import RemoteDataset
+from utils import RemoteDataset, ConditionalNormalize
 import csv
 
 if os.environ.get("PROD") is None:
     IMAGENET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imagenet")
 else:
     IMAGENET_PATH = "/workspace/data/imagenet"
-
-# Generate a unique filename based on the current datetime
-# filename = f"experiment_statistics_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-
-# with open(filename, 'w', newline='') as csvfile:
-#      csvwriter = csv.writer(csvfile)
-#      csvwriter.writerow(['Epoch', 'Accuracy', 'Best Accuracy', 'Runtime (seconds)'])
 
 
 LOGGER = logging.getLogger()
@@ -69,7 +62,7 @@ parser.add_argument('-b', '--batch-size', default=256, type=int,
                     help='mini-batch size (default: 256), this is the total '
                          'batch size of all GPUs on the current node when '
                          'using Data Parallel or Distributed Data Parallel')
-parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
+parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
@@ -150,14 +143,9 @@ def main():
     else:
         ngpus_per_node = 1
     if args.multiprocessing_distributed:
-        # Since we have ngpus_per_node processes per node, the total world_size
-        # needs to be adjusted accordingly
         args.world_size = ngpus_per_node * args.world_size
-        # Use torch.multiprocessing.spawn to launch distributed processes: the
-        # main_worker process function
         mp.spawn(main_worker, nprocs=ngpus_per_node, args=(ngpus_per_node, args))
     else:
-        # Simply call main_worker function
         main_worker(args.gpu, ngpus_per_node, args)
 
 
@@ -285,11 +273,6 @@ def main_worker(gpu, ngpus_per_node, args):
         LOGGER.info("Sample Metrics from Profiling:", sample_metrics)
         return
 
-    # offloading_plan = {}
-    # if sample_metrics:  # If the profiler identifies an I/O bottleneck
-    #     decision_engine = DecisionEngine(sample_metrics)
-    #     offloading_plan = decision_engine.create_offloading_plan()
-
     if args.dummy:
         LOGGER.warning("=> Dummy data is used!")
         train_dataset = datasets.FakeData(
@@ -311,8 +294,8 @@ def main_worker(gpu, ngpus_per_node, args):
         val_dataset = datasets.ImageFolder(
             valdir,
             transforms.Compose([
-                transforms.RandomResizedCrop(224),
-                transforms.RandomHorizontalFlip(),
+                transforms.Resize(256),
+                transforms.CenterCrop(224),
                 transforms.ToTensor(),
                 normalize
             ]))
@@ -429,6 +412,7 @@ def validate(val_loader, model, criterion, args):
         with torch.no_grad():
             end = time.time()
             for i, (images, target) in enumerate(loader):
+
                 i = base_progress + i
                 if args.gpu is not None and torch.cuda.is_available():
                     images = images.cuda(args.gpu, non_blocking=True)

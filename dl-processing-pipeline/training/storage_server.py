@@ -11,11 +11,12 @@ import zlib
 import time
 from io import BytesIO
 import argparse
-from utils import DecodeJPEG, ConditionalNormalize, ImagePathDataset, load_logging_config
+from utils import DecodeJPEG, ConditionalNormalize, ImagePathDataset, load_logging_config, custom_collate_fn
 import asyncio
 import hashlib
 import logging
 import numpy as np
+
 
 from PIL import Image
 
@@ -40,15 +41,15 @@ def parse_args():
     - `--compression`: 0- no compression, 1- compress all samples before sending, 2- compress based on selective offloading plan.
     - `--batch_size`: Determines the batch size for loading images.
     - `--compression-method`: Specifies the type of compression to use (e.g., 'zlib', 'pillow').
-    - `--compression-level`: Quality level for image compression (0-9) for zlib
+    - `--compression-level`: compression level for image compression (0-9) for zlib
     - '--compression-quality': Quality level for image compression (1-95) for pillow
     Returns:
         Namespace with parsed arguments.
     """
     parser = argparse.ArgumentParser(description="Start the data feed server with an offloading plan.")
-    parser.add_argument('--offloading', type=int, default=0, help='Set t0 0 for no offloading, 1 for full offloading, or 2 for dynamic offloading.')
+    parser.add_argument('--offloading', type=int, default=0, help='Set to 0 for no offloading, 1 for full offloading, or 2 for dynamic offloading including compression.')
     parser.add_argument('--compression', type=int, default=0, help='Set to 1 to enable compression before sending the sample.')
-    parser.add_argument('--batch_size', type=int, default=200, help='Batch size for loading images.')
+    parser.add_argument('--batch_size', type=int, default=16, help='Batch size for loading images.')
     parser.add_argument(
         '--compression-method', type=str, choices=['zlib', 'pillow'], default='zlib',
         help="Specifies the type of compression to use ('zlib' or 'pillow')."
@@ -128,7 +129,7 @@ class DataFeedService(data_feed_pb2_grpc.DataFeedServicer):
         while not kill.is_set():
             try:
                 # Attempt to retrieve the next sample batch
-                sample_batch = self.q.get(timeout=5)  # Get individual samples from the queue
+                sample_batch = self.q.get(timeout=5)  # Get individual samples from the queue 1699848 /16 *100000
                 sample_batch_proto = [
                     data_feed_pb2.Sample(
                         id=sample[0],
@@ -141,11 +142,11 @@ class DataFeedService(data_feed_pb2_grpc.DataFeedServicer):
                 ]
 
                 # Log the data types before yielding
-                # LOGGER.debug("Debug - Types in `get_samples` before yielding: id: %s, image: %s, label: %s, transformations_applied: %s, is_compressed: %s",
-                            #  type(sample_batch[0][0]), type(sample_batch[0][1]), type(sample_batch[0][2]), type(sample_batch[0][3]), type(sample_batch[0][4]))
+                LOGGER.info("Debug - Types in `get_samples` before yielding: id: %s, image: %s, label: %s, transformations_applied: %s, is_compressed: %s",
+                            type(sample_batch[0][0]), type(sample_batch[0][1]), type(sample_batch[0][2]), type(sample_batch[0][3]), type(sample_batch[0][4]))
                 # Calculate and print the data size of sample_batch_proto
                 data_size = sum(len(sample.image) for sample in sample_batch_proto)
-                # LOGGER.debug(f"Data size of sample_batch_proto: {data_size} bytes")
+                LOGGER.info(f"Data size of sample_batch_proto: {data_size} bytes")
 
                 # Yield the data in the expected gRPC format
                 yield data_feed_pb2.SampleBatch(samples=sample_batch_proto)
@@ -180,7 +181,7 @@ def fill_queue(q, kill, args, dataset_path, offloading_plan, worker_id):
 
     # Ensure that ImageFolder uses the transform to convert images to tensors
     dataset = ImagePathDataset(os.path.join(dataset_path, 'train'))
-    loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, num_workers=8, pin_memory=True, shuffle=True, collate_fn=custom_collate_fn)
     while not kill.is_set():
         for batch_idx, (data, target, sample_ids) in enumerate(loader):
             LOGGER.info(f"Worker {worker_id} - Batch {batch_idx}: Loaded {len(data)} images.")
@@ -256,7 +257,7 @@ async def serve(args):
         compression_value (int): Determines whether to compress samples before sending.
         batch_size (int): Number of images in each batch.
     """
-    q = mp.Queue(1000//args.batch_size)
+    q = mp.Queue(5000)
 
     # Cache for storing the offloading plan (sample_id -> number of transformations)
     offloading_plan = {}
@@ -291,34 +292,6 @@ async def serve(args):
     kill.set()
     for p in workers:
         p.join()
-
-def custom_collate_fn(batch):
-    """
-    Custom collate function for the DataLoader, reading raw images (instead of auto encoding to PIL Image object) and targets from disk.
-    
-    Arguments:
-        batch (list): List of tuples with image paths and labels.
-    Returns:
-        tuple: Three lists - raw images as binary data and their corresponding targets and id's.
-    """
-    raw_images = []
-    targets = []
-    sample_ids = []
-    for img_path, target in batch:
-        with open(img_path, 'rb') as f:
-            raw_img_data = f.read()  # Read the raw JPEG image in binary
-        raw_images.append(raw_img_data)
-        targets.append(target)
-        sample_ids.append(generate_id(img_path))
-    
-    return raw_images, targets, sample_ids  # Return two lists: images and targets
-
-@staticmethod
-def generate_id(filename):
-    """Generate a unique integer ID based on the file name."""
-    # Hash the file name and convert to an integer for a stable ID
-    hash_object = hashlib.md5(filename.encode())
-    return int(hash_object.hexdigest(), 16) % (10 ** 8)
 
 if __name__ == '__main__':
     """

@@ -10,21 +10,21 @@ import heapq
 class DecisionEngine:
     def __init__(self, sample_metrics, io_bandwidth,  cpu_cores_compute, cpu_cores_storage, grpc_host, grpc_port):
         """
-        :param sample_metrics: List of tuples (original_size, transformed_size, preprocessing_time)
-        :param tg: GPU time for one epoch (TG)
-        :param tcc: CPU time on compute node (TCC)
-        :param tcs: CPU time on storage node (TCS)
-        :param tnet: Network transfer time (TNet)
-        :param cpu_cores_compute: Number of CPU cores on compute node
-        :param cpu_cores_storage: Number of CPU cores on storage node
-        :param grpc_host: Hostname for the gRPC server
-        :param grpc_port: Port for the gRPC server
+        Initializes the DecisionEngine with the provided parameters.
+        :param sample_metrics: List of tuples containing sample metrics in the format 
+                               (original_size, transformed_size, preprocessing_time).
+        :param io_bandwidth: I/O bandwidth in Megabits per second. (it is converted to bytes/s)
+        :param cpu_cores_compute: Number of CPU cores on the compute node.
+        :param cpu_cores_storage: Number of CPU cores on the storage node.
+        :param grpc_host: Hostname for the gRPC server.
+        :param grpc_port: Port for the gRPC server.
         """
+        
         self.sample_metrics = sample_metrics
         self.num_samples = len(sample_metrics)
         self.cpu_cores_compute = cpu_cores_compute
         self.cpu_cores_storage = cpu_cores_storage
-        self.io_bandwidth = io_bandwidth
+        self.io_bandwidth = io_bandwidth * 125000 # Convert from Megabits/s to bytes/s
         
         self.grpc_host = grpc_host
         self.grpc_port = grpc_port
@@ -110,8 +110,8 @@ class DecisionEngine:
             offloading_plan[sample_id] = (stage, compression_used)
 
             # Check if offloading should stop based on TNet and TCS comparison
-            if current_tnet < current_tcs and current_tnet < current_tcc:
-                LOGGER.info(f"Stopping offloading: current_tnet={current_tnet} is less than current_tcs={current_tcs} and current_tcc={current_tcc}")
+            if current_tnet < max(current_tcs, current_tcc):
+                LOGGER.info(f"Stopping offloading: current_tnet={current_tnet} is less than current_tcs={current_tcs} or current_tcc={current_tcc}")
                 break
 
         return offloading_plan

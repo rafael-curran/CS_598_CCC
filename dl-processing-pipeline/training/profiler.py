@@ -9,8 +9,9 @@ import zlib
 import sys
 from io import BytesIO
 from PIL import Image
-import os
-import heapq
+
+import argparse
+
 from decision_engine import DecisionEngine
 from utils import DecodeJPEG, ConditionalNormalize, RemoteDataset, ImagePathDataset, encode_p
 import torchvision.models as models
@@ -21,9 +22,22 @@ import logging
 
 LOGGER = logging.getLogger()
 
+def parse_args():
+    """
+    Parses command-line arguments to configure the data feed server.
+    Arguments include:
+    - `--num-samples`: Sets the number of samples to be processed for offloading plans.
+    Returns:
+        Namespace with parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="Start the data feed server with an offloading plan.")
+    parser.add_argument('--num-samples', type=int, default=100, help='Set to 100 for testing, 100000 for profiling entire dataset')
+    parser.add_argument('--io-bandwidth', type=int, default=500, help='Set the I/O bandwidth in megabits per second')
+    return parser.parse_args()
+
 
 class Profiler:
-    def __init__(self, batch_size, dataset_path, grpc_host, grpc_port):
+    def __init__(self, batch_size, dataset_path, grpc_host, grpc_port, args):
         self.batch_size = batch_size
         self.dataset_path = dataset_path
         self.grpc_host = grpc_host
@@ -37,6 +51,7 @@ class Profiler:
             if torch.backends.mps.is_available()
             else torch.device("cpu")
         )
+        self.args = args
 
     def stage_one_profiling(self):
         # 1. Measure GPU throughput with synthetic data (remains the same)
@@ -92,19 +107,20 @@ class Profiler:
             ]
         )
         stub = data_feed_pb2_grpc.DataFeedStub(channel)
-
+        label_map = {}
         # Initiate the streaming request
         config_request = data_feed_pb2.Config(batch_size=self.batch_size)
         sample_stream = stub.get_samples(config_request)
         for sample_batch in sample_stream:
             for i, sample in enumerate(sample_batch.samples):
-                if i >= 1000:  # Limit to 100 samples for profiling
-                    break
+                label_map[sample.label] = label_map.get(sample.label, 0) + 1
+                # if i >= 1000:  # Limit to 100 samples for profiling
+                #     break
                 io_samples.append(sample)  # Collect individual samples
                 num_samples_io += 1
             if num_samples_io >= 1000:
                 break
-
+            
         io_time = time.time() - start
         io_throughput = num_samples_io / io_time
 
@@ -129,7 +145,9 @@ class Profiler:
 
             label = torch.tensor(s.label)
             num_samples_cpu += 1
-
+            if num_samples_cpu >= 1000:
+                break
+        print(f"Sample label map: {label_map}")
         cpu_time = time.time() - start
         LOGGER.info(f"CPU Time: {cpu_time}")
         LOGGER.info(f"Num Samples CPU: {num_samples_cpu}")
@@ -177,7 +195,8 @@ class Profiler:
                 })
                 
                 # Limit the number of samples to 100 for testing
-                if len(sample_metrics) >= 10000:
+                if len(sample_metrics) >= self.args.num_samples:
+                    
                     return sample_metrics
 
     def preprocess_sample(self, sample, transformations_applied):
@@ -305,14 +324,14 @@ class Profiler:
 
 if __name__ == '__main__':
     load_logging_config()
-    profiler = Profiler(batch_size=200, dataset_path='imagenet', grpc_host='localhost', grpc_port=50051)
+    args = parse_args()
+    profiler = Profiler(batch_size=200, dataset_path='imagenet', grpc_host='localhost', grpc_port=50051, args=args)
     gpu_throughput, io_throughput, cpu_preprocessing_throughput, sample_metrics = profiler.run_profiling()
-    #estimate io_bandwidth by sum of original sizes and io_throughput
-    io_bandwidth = 82100000
-    LOGGER.info(f"IO Bandwidth: {io_bandwidth}")
+    
+    LOGGER.info(f"IO Bandwidth: {args.io_bandwidth}")
     # print("Sample Metrics:", sample_metrics)
     if sample_metrics:  # If the profiler identifies an I/O bottleneck
-        decision_engine = DecisionEngine(sample_metrics,  io_bandwidth= io_bandwidth,  cpu_cores_compute=1, cpu_cores_storage=8, grpc_host='localhost', grpc_port=50051)
+        decision_engine = DecisionEngine(sample_metrics,  io_bandwidth= args.io_bandwidth,  cpu_cores_compute=1, cpu_cores_storage=8, grpc_host='localhost', grpc_port=50051)
         offloading_plan = decision_engine.send_offloading_requests()
-        print(offloading_plan)
+        print(len(offloading_plan))
 
