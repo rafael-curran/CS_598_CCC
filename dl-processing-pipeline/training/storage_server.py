@@ -1,10 +1,6 @@
 import multiprocessing as mp
 from concurrent import futures
 import grpc
-import sys
-#from torch.serialization import STORAGE
-#from torch.utils.tensorboard.summary import image
-from enum import Enum
 import data_feed_pb2
 import data_feed_pb2_grpc
 import torch
@@ -15,7 +11,7 @@ import zlib
 import time
 from io import BytesIO
 import argparse
-from utils import DecodeJPEG, ConditionalNormalize, ImagePathDataset, load_logging_config, custom_collate_fn,monitor_system
+from utils import DecodeJPEG, ConditionalNormalize, ImagePathDataset, load_logging_config, custom_collate_fn
 import asyncio
 import hashlib
 import logging
@@ -29,14 +25,6 @@ num_cores = mp.cpu_count()
 
 LOGGER = logging.getLogger()
 DATA_LOGGER = logging.getLogger("data_collection")
-
-STORAGE_NODE_LOGGER = logging.getLogger("storage_node")
-formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-file_handler = logging.FileHandler("logs/storage_system_monitor.log")
-file_handler.setFormatter(formatter)
-STORAGE_NODE_LOGGER.addHandler(file_handler)
-STORAGE_NODE_LOGGER.setLevel(logging.INFO)
-# STORAGE_NODE_LOGGER.info("Testing STORAGE_NODE_LOGGER")
 
 if os.environ.get("PROD") is None:
     IMAGENET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "imagenet")
@@ -181,7 +169,6 @@ def fill_queue(q, kill, args, dataset_path, offloading_plan, worker_id):
         worker_id (int): Unique ID for the worker instance (used in logging).
     """
     # Custom decode transformation
-    STORAGE_NODE_LOGGER.info("Testing STORAGE_NODE_LOGGER")
     decode_jpeg = DecodeJPEG()
 
     transformations = [
@@ -195,23 +182,9 @@ def fill_queue(q, kill, args, dataset_path, offloading_plan, worker_id):
     # Ensure that ImageFolder uses the transform to convert images to tensors
     dataset = ImagePathDataset(os.path.join(dataset_path, 'train'))
     loader = torch.utils.data.DataLoader(dataset, batch_size=args.batch_size, num_workers=8, pin_memory=True, shuffle=True, collate_fn=custom_collate_fn)
-
-    total_images = 0  # Track total number of images
-    total_data_size = 0  # Track cumulative data size in bytes
-    end = time.time()
-
-
     while not kill.is_set():
-
         for batch_idx, (data, target, sample_ids) in enumerate(loader):
-
-            # STORAGE_NODE_LOGGER.info(f"Batch Worker {worker_id} - Batch {batch_idx}: Loaded {len(data)} images.")
-            end = time.time()
-            batch_time = AverageMeter("Time", ":6.3f")
-            original_image_size = AverageMeter("Original_Image_Size", ":6.3f")
-            transformed_image_size = AverageMeter("Transformed_Image_Size", ":6.3f")
-            image_num = AverageMeter("Image_Num", ":6.3f")
-
+            LOGGER.info(f"Worker {worker_id} - Batch {batch_idx}: Loaded {len(data)} images.")
             sample_batch =[]
             for i, img in enumerate(data): # Loop over individual samples
                 sample_id = sample_ids[i]
@@ -262,21 +235,9 @@ def fill_queue(q, kill, args, dataset_path, offloading_plan, worker_id):
                         is_compressed = True
 
                 label = target[i]
-                transformed_image_size.update(sys.getsizeof(transformed_data))
-                original_image_size.update(sys.getsizeof(img))
-                batch_time.update(time.time() - end)
-                image_num.update(1.0)
-
-
+                
                 sample = (sample_id, transformed_data, label, num_transformations, is_compressed)
                 sample_batch.append(sample)
-                # STORAGE_NODE_LOGGER.info(f"Mini Worker {worker_id} - Batch {batch_idx}: Processed {image_num.sum} images of {image_size.sum / (1024 ** 2):.2f} MB in {batch_time.sum} seconds")
-                end = time.time()
-
-            monitor_system(STORAGE_NODE_LOGGER)
-
-            STORAGE_NODE_LOGGER.info(f"Batch Worker {worker_id} - Batch {batch_idx}: Processed {image_num.sum} images processed {original_image_size.sum/ (1024 ** 2):.2f} MB to reduce to {transformed_image_size.sum/ (1024 ** 2):.2f} MB in {batch_time.sum} seconds")
-
             added = False
             while not added and not kill.is_set():
                 try:
@@ -342,61 +303,3 @@ if __name__ == '__main__':
     
     asyncio.run(serve(args))
     
-class Summary(Enum):
-    NONE = 0
-    AVERAGE = 1
-    SUM = 2
-    COUNT = 3
-
-
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-
-    def __init__(self, name, fmt=":f", summary_type=Summary.AVERAGE):
-        self.name = name
-        self.fmt = fmt
-        self.summary_type = summary_type
-        self.reset()
-
-    def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
-
-    def update(self, val, n=1):
-        self.val = val
-        self.sum += val * n
-        self.count += n
-        self.avg = self.sum / self.count
-
-    def all_reduce(self):
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            device = torch.device("mps")
-        else:
-            device = torch.device("cpu")
-        total = torch.tensor([self.sum, self.count], dtype=torch.float32, device=device)
-        dist.all_reduce(total, dist.ReduceOp.SUM, async_op=False)
-        self.sum, self.count = total.tolist()
-        self.avg = self.sum / self.count
-
-    def __str__(self):
-        fmtstr = "{name} {val" + self.fmt + "} ({avg" + self.fmt + "})"
-        return fmtstr.format(**self.__dict__)
-
-    def summary(self):
-        fmtstr = ""
-        if self.summary_type is Summary.NONE:
-            fmtstr = ""
-        elif self.summary_type is Summary.AVERAGE:
-            fmtstr = "{name} {avg:.3f}"
-        elif self.summary_type is Summary.SUM:
-            fmtstr = "{name} {sum:.3f}"
-        elif self.summary_type is Summary.COUNT:
-            fmtstr = "{name} {count:.3f}"
-        else:
-            raise ValueError("invalid summary type %r" % self.summary_type)
-
-        return fmtstr.format(**self.__dict__)
