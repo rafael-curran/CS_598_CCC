@@ -1,11 +1,21 @@
-FROM python:3.9-slim
+FROM python:3.10-slim
 
 WORKDIR /app
 
 COPY requirements.txt /app/
+COPY train_server.py /app/
+COPY storage_server.py /app/
+COPY data_feed_pb2_grpc.py /app/
+COPY data_feed_pb2.py /app/
+COPY profiler.py /app/
+COPY utils.py /app/
+COPY logging.json /app/
+COPY decision_engine.py /app/
+COPY config.yaml /app/
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY storage_server.py /app
+ENV OFFLOADING="0"
+ENV COMPRESSION="0"
 
-CMD ["python", "storage_server.py"]
+CMD ["sh", "-c", "python storage_server.py --offloading $OFFLOADING --compression $COMPRESSION --batch_size 8"]
