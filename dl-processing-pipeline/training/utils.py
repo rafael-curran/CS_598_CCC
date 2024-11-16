@@ -16,6 +16,10 @@ import logging
 from logging.config import dictConfig
 from typing import List, Tuple, Callable, Optional
 from torch.utils.data import get_worker_info
+import psutil
+import torch
+from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetUtilizationRates, nvmlDeviceGetMemoryInfo, nvmlShutdown
+
 
 LOGGER = logging.getLogger()
 
@@ -387,3 +391,25 @@ def generate_id(filename):
     # Hash the file name and convert to an integer for a stable ID
     hash_object = hashlib.md5(filename.encode())
     return int(hash_object.hexdigest(), 16) % (10 ** 8)
+
+def monitor_system(logger):
+    logger.info("=== CPU ===")
+    logger.info(f"CPU Utilization: {psutil.cpu_percent(interval=1)}%")
+    logger.info(f"CPU Core Utilization: {psutil.cpu_percent(interval=1, percpu=True)}")
+    logger.info(f"RAM Usage: {psutil.virtual_memory().used / (1024 ** 3):.2f} GB / {psutil.virtual_memory().total / (1024 ** 3):.2f} GB")
+
+    if torch.cuda.is_available():
+        logger.info("\n=== GPU ===")
+        nvmlInit()
+        for i in range(torch.cuda.device_count()):
+            handle = nvmlDeviceGetHandleByIndex(i)
+            utilization = nvmlDeviceGetUtilizationRates(handle)
+            memory = nvmlDeviceGetMemoryInfo(handle)
+            logger.info(f"GPU {i}: {torch.cuda.get_device_name(i)}")
+            logger.info(f"  GPU Utilization: {utilization.gpu}%")
+            logger.info(f"  GPU Memory Utilization: {utilization.memory}%")
+            logger.info(f"  GPU Memory Used: {memory.used / (1024 ** 2):.2f} MB")
+            logger.info(f"  GPU Memory Total: {memory.total / (1024 ** 2):.2f} MB")
+        nvmlShutdown()
+    else:
+        logger.info("\nNo GPU available.")
