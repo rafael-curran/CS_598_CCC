@@ -99,6 +99,7 @@ parser.add_argument('--grpc-host', default='localhost', type=str, help='Host of 
 parser.add_argument('--grpc-port', default='50051', type=str, help='Port of the gRPC server')
 parser.add_argument('--profile-only', action='store_true', help='run profiling only without training')
 parser.add_argument('--total-samples', default=100000, type=int, help='Total number of samples to process')
+parser.add_argument('--csv-filename', default='metrics.csv', type=str, help='Filename to save metrics to')
 
 
 
@@ -338,7 +339,7 @@ def main_worker(gpu, ngpus_per_node, args):
         train(train_loader, model, criterion, optimizer, epoch, device, args)
 
         # evaluate on validation set
-        acc1 = validate(val_loader, model, criterion, args)
+        acc1, acc5 = validate(val_loader, model, criterion, args)
 
         scheduler.step()
         # epoch_runtime = time.time() - start_time
@@ -354,9 +355,11 @@ def main_worker(gpu, ngpus_per_node, args):
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
+                'best_acc5': acc5,
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
             }, is_best)
+            save_metrics_to_csv(args.csv_filename, epoch, acc1, acc5)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, device, args):
@@ -479,13 +482,52 @@ def validate(val_loader, model, criterion, args):
 
     progress.display_summary()
 
-    return top1.avg
+    return top1.avg, top5.avg
 
 
 def save_checkpoint(state, is_best, filename="checkpoint.pth.tar"):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, "model_best.pth.tar")
+
+def save_metrics_to_csv(filename, epoch, acc1, acc5):
+    """
+    Saves the current epoch, acc1, and acc5 metrics to a CSV file in the 'logs/' directory.
+
+    Arguments:
+        filename (str): Name of the CSV file (e.g., 'metrics.csv').
+        epoch (int): Current epoch number.
+        acc1 (tensor): Top-1 accuracy value (PyTorch tensor).
+        acc5 (tensor): Top-5 accuracy value (PyTorch tensor).
+    """
+    # Create the logs directory if it doesn't exist
+    logs_dir = 'logs'
+    os.makedirs(logs_dir, exist_ok=True)
+
+    # Construct the full path to the CSV file
+    csv_filename = os.path.join(logs_dir, filename)
+
+    # Convert tensors to floats if necessary
+    acc1 = acc1.item() if isinstance(acc1, torch.Tensor) else acc1
+    acc5 = acc5.item() if isinstance(acc5, torch.Tensor) else acc5
+
+    # Define the CSV header
+    header = ['epoch', 'acc1', 'acc5']
+
+    # Check if the CSV file exists; if not, create it and write the header
+    file_exists = os.path.isfile(csv_filename)
+
+    with open(csv_filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+
+        # Write the header only if the file is new
+        if not file_exists:
+            writer.writerow(header)
+
+        # Write the current metrics as a new row
+        writer.writerow([epoch, acc1, acc5])
+        LOGGER.info(f"Metrics saved to {csv_filename}: epoch={epoch}, acc1={acc1:.4f}, acc5={acc5:.4f}")
+
 
 
 class Summary(Enum):

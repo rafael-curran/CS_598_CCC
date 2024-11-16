@@ -20,6 +20,8 @@ import numpy as np
 
 from PIL import Image
 
+total_data_traffic_mb = 0
+
 kill = mp.Event()  # Global event to signal termination
 num_cores = mp.cpu_count()
 
@@ -142,11 +144,20 @@ class DataFeedService(data_feed_pb2_grpc.DataFeedServicer):
                 ]
 
                 # Log the data types before yielding
-                LOGGER.info("Debug - Types in `get_samples` before yielding: id: %s, image: %s, label: %s, transformations_applied: %s, is_compressed: %s",
-                            type(sample_batch[0][0]), type(sample_batch[0][1]), type(sample_batch[0][2]), type(sample_batch[0][3]), type(sample_batch[0][4]))
+                # LOGGER.info("Debug - Types in `get_samples` before yielding: id: %s, image: %s, label: %s, transformations_applied: %s, is_compressed: %s",
+                #             type(sample_batch[0][0]), type(sample_batch[0][1]), type(sample_batch[0][2]), type(sample_batch[0][3]), type(sample_batch[0][4]))
                 # Calculate and print the data size of sample_batch_proto
+                global total_data_traffic_mb
+
+                # Calculate the total size of the current batch (in bytes)
                 data_size = sum(len(sample.image) for sample in sample_batch_proto)
-                LOGGER.info(f"Data size of sample_batch_proto: {data_size} bytes")
+                # LOGGER.info(f"Server: Yielded batch of {len(sample_batch_proto)} samples, total size: {data_size} bytes")
+
+                # Convert to megabytes and increment the global counter
+                total_data_traffic_mb += data_size / (1024 * 1024)  # Convert bytes to MB
+
+                # Optionally log the total data traffic periodically
+                LOGGER.info(f"Total data traffic so far: {total_data_traffic_mb:.2f} MB")
 
                 # Yield the data in the expected gRPC format
                 yield data_feed_pb2.SampleBatch(samples=sample_batch_proto)
@@ -195,8 +206,9 @@ def fill_queue(q, kill, args, dataset_path, offloading_plan, worker_id):
                     num_transformations = 5
                 else:
                     num_transformations, is_compressed = offloading_plan.get(sample_id, (0, False))
-                    if num_transformations == 0 and (is_compressed or args.compression == 1):
-                        num_transformations = 1
+
+                if num_transformations == 0 and (is_compressed or args.compression == 1):
+                    num_transformations = 1
 
                 transformed_data = img  
                 for j in range(min(num_transformations, 5)):  
