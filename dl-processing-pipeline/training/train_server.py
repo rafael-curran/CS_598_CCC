@@ -5,7 +5,7 @@ import shutil
 import time
 import warnings
 from enum import Enum
-from utils import load_logging_config
+from utils import load_logging_config, monitor_system
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -33,7 +33,17 @@ else:
 
 
 LOGGER = logging.getLogger()
+
 DATA_LOGGER = logging.getLogger("data_collection")
+TRAIN_LOGGER = logging.getLogger("train_collection")
+VALIDATION_LOGGER = logging.getLogger("validation_collection")
+
+TRAIN_LOGGER.addHandler(logging.FileHandler("logs/train_collection.log"))
+VALIDATION_LOGGER.addHandler(logging.FileHandler("logs/validation_collection.log"))
+
+
+COMPUTE_NODE_LOGGER = logging.getLogger("compute_node")
+COMPUTE_NODE_LOGGER.addHandler(logging.FileHandler("logs/compute_system_monitor.log") )
 
 
 model_names = sorted(
@@ -98,7 +108,7 @@ parser.add_argument('--dummy', action='store_true', help="use fake data to bench
 parser.add_argument('--grpc-host', default='localhost', type=str, help='Host of the gRPC server')
 parser.add_argument('--grpc-port', default='50051', type=str, help='Port of the gRPC server')
 parser.add_argument('--profile-only', action='store_true', help='run profiling only without training')
-parser.add_argument('--total-samples', default=100000, type=int, help='Total number of samples to process')
+parser.add_argument('--total-samples', default=1600, type=int, help='Total number of samples to process')
 
 
 
@@ -328,14 +338,16 @@ def main_worker(gpu, ngpus_per_node, args):
 
     # with open(filename, 'a', newline='') as csvfile:
     #     csvwriter = csv.writer(csvfile)
+    end = time.time()
     for epoch in range(args.start_epoch, args.epochs):
+        end = time.time()
         if args.distributed:
             train_sampler.set_epoch(epoch)
 
-        start_time = time.time()
 
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch, device, args)
+        epoch_duration = time.time() - end
 
         # evaluate on validation set
         acc1 = validate(val_loader, model, criterion, args)
@@ -347,10 +359,20 @@ def main_worker(gpu, ngpus_per_node, args):
         is_best = acc1 > best_acc1
         best_acc1 = max(acc1, best_acc1)
 
+        epoch_log = {
+            'epoch': epoch + 1,
+            'val_accuracy': acc1.item(),
+            'val_best_accuracy': best_acc1.item(),
+            'epoch_time': epoch_duration  # Average epoch time across all epochs
+        }
+        # Log the dictionary as an INFO message
+        VALIDATION_LOGGER.info(f"Epoch log: {epoch_log}")
+
+
         if not args.multiprocessing_distributed or (args.multiprocessing_distributed
                 and args.rank % ngpus_per_node == 0):
             save_checkpoint({
-                'epoch': epoch + 1,
+                'epoch': epoch,
                 'arch': args.arch,
                 'state_dict': model.state_dict(),
                 'best_acc1': best_acc1,
@@ -365,15 +387,18 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
     losses = AverageMeter("Loss", ":.4e")
     top1 = AverageMeter("Acc@1", ":6.2f")
     top5 = AverageMeter("Acc@5", ":6.2f")
-    num_batches = 100000 // args.batch_size  # Adjust this based on your dataset size
+    image_size = AverageMeter("Image_Size", ":6.3f")
+    image_num = AverageMeter("Image_Num", ":6.3f")
+    num_batches = 1600 // args.batch_size  # Adjust this based on your dataset size
     progress = ProgressMeter(
         num_batches,
-        [batch_time, data_time, losses, top1, top5],
+        [batch_time, data_time, image_size, image_num, losses, top1, top5],
         prefix="Epoch: [{}]".format(epoch),
     )
 
     model.train()
     end = time.time()
+    start = time.time()
     num_images = 0
     for i, (images, target) in enumerate(train_loader):
         if num_images >= args.total_samples:  # Stop if we've processed enough samples
@@ -383,9 +408,14 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         # target = target.view(-1)  # Adjust target as well
 
         data_time.update(time.time() - end)
+        total_data_transferred = images.element_size() * images.nelement()
+        total_data_transferred += target.element_size() * target.nelement()
+        image_size.update(total_data_transferred)
+        image_num.update(images.shape[0])
 
         images = images.to(device, non_blocking=True)
         target = target.to(device, non_blocking=True)
+        # print(i, images.shape, target)
 
         output = model(images)
         loss = criterion(output, target)
@@ -403,9 +433,27 @@ def train(train_loader, model, criterion, optimizer, epoch, device, args):
         end = time.time()
         num_images += images.size(0)
 
+        COMPUTE_NODE_LOGGER.info(f"Epoch: {epoch}, Batch: {i}/{num_batches}")
+        monitor_system(COMPUTE_NODE_LOGGER)
+
         if i % args.print_freq == 0:
             progress.display(i + 1)
+            COMPUTE_NODE_LOGGER.info(f"Epoch: {epoch}, Batch: {i}/{num_batches}")
+            monitor_system(COMPUTE_NODE_LOGGER)
 
+    epoch_metrics = {
+        'epoch': epoch,
+        'epoch_time': batch_time.sum,
+        'batch_num': batch_time.count,
+        'epoch_time_2': end - start,
+        'data_time': data_time.sum,
+        'loss': losses.avg,
+        'accuracy_top1': top1.avg.item(),
+        'accuracy_top5': top5.avg.item(),
+        'image_size': image_size.sum,
+        'image_num': image_num.sum
+    }
+    TRAIN_LOGGER.info(f"Epoch log: {epoch_metrics}")
 
 def validate(val_loader, model, criterion, args):
     def run_validate(loader, base_progress=0):
@@ -557,12 +605,12 @@ class ProgressMeter(object):
     def display(self, batch):
         entries = [self.prefix + self.batch_fmtstr.format(batch)]
         entries += [str(meter) for meter in self.meters]
-        LOGGER.info("\t".join(entries))
+        DATA_LOGGER.info("\t".join(entries))
 
     def display_summary(self):
         entries = [" *"]
         entries += [meter.summary() for meter in self.meters]
-        LOGGER.info(" ".join(entries))
+        DATA_LOGGER.info(" ".join(entries))
 
     def _get_batch_fmtstr(self, num_batches):
         num_digits = len(str(num_batches // 1))
