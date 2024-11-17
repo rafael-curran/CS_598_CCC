@@ -342,7 +342,7 @@ def main_worker(gpu, ngpus_per_node, args):
         acc1, acc5 = validate(val_loader, model, criterion, args)
 
         scheduler.step()
-        # epoch_runtime = time.time() - start_time
+        epoch_runtime = time.time() - start_time
         # csvwriter.writerow([epoch + 1, f"{acc1:.2f}", f"{best_acc1:.2f}", f"{epoch_runtime:.2f}"])
         # remember best acc@1 and save checkpoint
         is_best = acc1 > best_acc1
@@ -359,7 +359,7 @@ def main_worker(gpu, ngpus_per_node, args):
                 'optimizer' : optimizer.state_dict(),
                 'scheduler' : scheduler.state_dict()
             }, is_best)
-            save_metrics_to_csv(args.csv_filename, epoch, acc1, acc5)
+            save_metrics_to_csv(args.csv_filename, epoch, epoch_runtime, acc1, acc5)
 
 
 def train(train_loader, model, criterion, optimizer, epoch, device, args):
@@ -490,7 +490,7 @@ def save_checkpoint(state, is_best, filename="checkpoint.pth.tar"):
     if is_best:
         shutil.copyfile(filename, "model_best.pth.tar")
 
-def save_metrics_to_csv(filename, epoch, acc1, acc5):
+def save_metrics_to_csv(filename, epoch, epoch_runtime, acc1, acc5):
     """
     Saves the current epoch, acc1, and acc5 metrics to a CSV file in the 'logs/' directory.
 
@@ -512,7 +512,7 @@ def save_metrics_to_csv(filename, epoch, acc1, acc5):
     acc5 = acc5.item() if isinstance(acc5, torch.Tensor) else acc5
 
     # Define the CSV header
-    header = ['epoch', 'acc1', 'acc5']
+    header = ['epoch', 'acc1', 'acc5', 'epoch_runtime']
 
     # Check if the CSV file exists; if not, create it and write the header
     file_exists = os.path.isfile(csv_filename)
@@ -525,8 +525,8 @@ def save_metrics_to_csv(filename, epoch, acc1, acc5):
             writer.writerow(header)
 
         # Write the current metrics as a new row
-        writer.writerow([epoch, acc1, acc5])
-        LOGGER.info(f"Metrics saved to {csv_filename}: epoch={epoch}, acc1={acc1:.4f}, acc5={acc5:.4f}")
+        writer.writerow([epoch, acc1, acc5, epoch_runtime])
+        LOGGER.info(f"Metrics saved to {csv_filename}: epoch={epoch}, acc1={acc1:.4f}, acc5={acc5:.4f}, epoch_runtime={epoch_runtime:.4f}")
 
 
 
