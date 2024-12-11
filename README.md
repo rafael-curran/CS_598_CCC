@@ -42,6 +42,7 @@ This guide walks you through setting up the dataset, starting the storage server
 
 3. Start the storage server (include specific command if needed, e.g., a script or service start):
    ```bash
+   pip install -r requirements.txt
    python -m venv dl-env
    python3 storage_server.py --offloading 0 --compression 0 --batch_size 16
    ```
