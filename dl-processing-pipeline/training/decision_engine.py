@@ -30,91 +30,96 @@ class DecisionEngine:
         self.grpc_port = grpc_port
         self.offloading_plan = {}
         
-    def decide_offloading(self):
-        offloading_heap = []
-        LOGGER.info(f"Sample_metrics data type = {type(self.sample_metrics)}")
 
-        # Iterate through each sample in sample_metrics
-        for _, sample in enumerate(self.sample_metrics):
-            sample_id = sample['sample_id']
-            original_size = sample['original_size']
-            transformed_sizes = sample['transformed_sizes']
-            preprocessing_times = sample['preprocessing_times']
-            compressed_sizes = sample['compressed_sizes']
-            compression_times = sample['compression_times']
+'''
+The optimizations made to improve runtime include:
+ In decide_offloading:
+Removed the unnecessary enumeration of samples.
+Combined the loops for checking offloading plans with and without compression.
+Eliminated redundant calculations of cumulative time.
+ In iterative_offloading:
+Used generator expressions instead of list comprehensions for calculating total preprocessing time and current data traffic.
+Removed the unused current_offloading_plan dictionary.
+Simplified the logging statements and rounded float values for better readability.
+'''
 
-            # Track cumulative preprocessing time
-            cumulative_time = 0
-            best_efficiency = 0
-            best_plan = None
-            LOGGER.debug(
-                f"Processing sample {sample_id}: original_size={original_size}"
-            )
+def decide_offloading(self):
+    offloading_heap = []
+    LOGGER.info(f"Sample_metrics data type = {type(self.sample_metrics)}")
 
+    for sample in self.sample_metrics:
+        sample_id = sample['sample_id']
+        original_size = sample['original_size']
+        transformed_sizes = sample['transformed_sizes']
+        preprocessing_times = sample['preprocessing_times']
+        compressed_sizes = sample['compressed_sizes']
+        compression_times = sample['compression_times']
+
+        best_efficiency = 0
+        best_plan = None
+
+        cumulative_time = 0
+        for i, (transformed_size, preprocessing_time) in enumerate(zip(transformed_sizes, preprocessing_times)):
+            cumulative_time += preprocessing_time
+            
             # Check offloading plan without compression
-            for i, transformed_size in enumerate(transformed_sizes):
-                cumulative_time += preprocessing_times[i]
-                size_reduction = original_size - transformed_size if transformed_size else 0
-                if cumulative_time > 0 and size_reduction > 0:
-                    efficiency = size_reduction / cumulative_time
-                    if efficiency > best_efficiency:
-                        best_efficiency = efficiency
-                        best_plan = (sample_id, size_reduction, cumulative_time, i + 1, False)
+            size_reduction = original_size - transformed_size if transformed_size else 0
+            if cumulative_time > 0 and size_reduction > 0:
+                efficiency = size_reduction / cumulative_time
+                if efficiency > best_efficiency:
+                    best_efficiency = efficiency
+                    best_plan = (sample_id, size_reduction, cumulative_time, i + 1, False)
 
             # Check offloading plan with compression
-            cumulative_time = 0
-            for i, (compressed_size, compression_time) in enumerate(zip(compressed_sizes, compression_times)):
-                cumulative_time += preprocessing_times[i]
+            if i < len(compressed_sizes):
+                compressed_size = compressed_sizes[i]
+                compression_time = compression_times[i]
                 cumulative_time_with_compression = cumulative_time + compression_time
-                size_reduction = original_size - compressed_size if compressed_size else 0
+                size_reduction = original_size - compressed_size
                 if cumulative_time_with_compression > 0 and size_reduction > 0:
                     efficiency = size_reduction / cumulative_time_with_compression
                     if efficiency > best_efficiency:
                         best_efficiency = efficiency
                         best_plan = (sample_id, size_reduction, cumulative_time_with_compression, i + 1, True)
 
-            # Insert the best offloading plan into the heap if it has positive efficiency
-            if best_efficiency > 0:
-                heapq.heappush(offloading_heap, (-best_efficiency, best_plan))
-                LOGGER.info(f"Sample {sample_id} added to offloading plan with efficiency {best_efficiency:.4f}, "
-                      f"stage {best_plan[3]}, compression: {best_plan[4]}")
+        if best_efficiency > 0:
+            heapq.heappush(offloading_heap, (-best_efficiency, best_plan))
+            LOGGER.info(f"Sample {sample_id} added to offloading plan with efficiency {best_efficiency:.4f}, "
+                        f"stage {best_plan[3]}, compression: {best_plan[4]}")
 
-        return offloading_heap
+    return offloading_heap
 
-    def iterative_offloading(self):
-        total_preprocessing_time_compute = sum([sum(sample['preprocessing_times']) for sample in self.sample_metrics])
-        total_preprocessing_time_storage = 0
-        current_data_traffic = sum([sample['original_size'] for sample in self.sample_metrics])
+def iterative_offloading(self):
+    total_preprocessing_time_compute = sum(sum(sample['preprocessing_times']) for sample in self.sample_metrics)
+    total_preprocessing_time_storage = 0
+    current_data_traffic = sum(sample['original_size'] for sample in self.sample_metrics)
 
-        current_tcc = total_preprocessing_time_compute / self.cpu_cores_compute  
-        current_tcs = 0
+    current_tcc = total_preprocessing_time_compute / self.cpu_cores_compute
+    current_tcs = 0
+    current_tnet = current_data_traffic / self.io_bandwidth
+
+    offloading_plan = {}
+    decisions = self.decide_offloading()
+
+    for _, (sample_id, sample_size_reduction, cumulative_time, stage, compression_used) in decisions:
+        current_data_traffic -= sample_size_reduction
+        total_preprocessing_time_compute -= cumulative_time
+        total_preprocessing_time_storage += cumulative_time
+
+        current_tcc = total_preprocessing_time_compute / self.cpu_cores_compute
+        current_tcs = total_preprocessing_time_storage / self.cpu_cores_storage
         current_tnet = current_data_traffic / self.io_bandwidth
-        current_offloading_plan = {}  
 
-        offloading_plan = {}
-        decisions = self.decide_offloading()
+        LOGGER.info(f"Sample {sample_id} selected for offloading: stage={stage}, "
+                    f"compression_used={compression_used}, current_tnet={current_tnet:.2f}, current_tcs={current_tcs:.2f}, current_tcc={current_tcc:.2f}")
 
-        for _, (sample_id,sample_size_reduction, cumulative_time, stage, compression_used) in decisions:
-            current_data_traffic -= sample_size_reduction
-            total_preprocessing_time_compute -= cumulative_time
-            total_preprocessing_time_storage += cumulative_time
+        offloading_plan[sample_id] = (stage, compression_used)
 
-            current_tcc = total_preprocessing_time_compute / self.cpu_cores_compute  
-            current_tcs = total_preprocessing_time_storage / self.cpu_cores_storage
-            current_tnet = current_data_traffic / self.io_bandwidth
+        if current_tnet < max(current_tcs, current_tcc):
+            LOGGER.info(f"Stopping offloading: current_tnet={current_tnet:.2f} is less than current_tcs={current_tcs:.2f} or current_tcc={current_tcc:.2f}")
+            break
 
-            LOGGER.info(f"Sample {sample_id} selected for offloading: stage={stage}, "
-                  f"compression_used={compression_used}, current_tnet={current_tnet}, current_tcs={current_tcs}, current_tcc={current_tcc}")
-
-            current_offloading_plan[sample_id] = stage
-            offloading_plan[sample_id] = (stage, compression_used)
-
-            # Check if offloading should stop based on TNet and TCS comparison
-            if current_tnet < max(current_tcs, current_tcc):
-                LOGGER.info(f"Stopping offloading: current_tnet={current_tnet} is less than current_tcs={current_tcs} or current_tcc={current_tcc}")
-                break
-
-        return offloading_plan
+    return offloading_plan
 
     def send_offloading_requests(self):
         # Create a gRPC channel to communicate with the storage server
