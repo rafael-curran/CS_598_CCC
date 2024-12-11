@@ -64,6 +64,9 @@ def parse_args():
         '--compression-quality', type=int, default=75, choices=range(1, 96),
         help='Compression quality for pillow (1-95). Default is 75.'
     )
+    parser.add_argument(
+        '--grpc-port', type=int, default=50051, help='Port for the gRPC server.'
+    )
     return parser.parse_args()
 
 
@@ -297,7 +300,7 @@ async def serve(args):
 
     )
     data_feed_pb2_grpc.add_DataFeedServicer_to_server(DataFeedService(q, offloading_plan), server)
-    server.add_insecure_port('[::]:50051')
+    server.add_insecure_port(f'[::]:{args.grpc_port}')
     await server.start()
     await server.wait_for_termination()
     
