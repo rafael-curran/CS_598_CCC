@@ -70,7 +70,7 @@ This guide walks you through setting up the dataset, starting the storage server
    - See source code for additional flags
 
 ## Notes
-
+- Make sure to navigate to training directory to run the training server
 - Make sure to adjust the paths and commands if your setup differs.
 - Monitor the training process for any errors or issues related to dataset loading or GPU usage.
 
