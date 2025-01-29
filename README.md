@@ -1,4 +1,12 @@
-# Deep Learning Processing Pipeline
+# Dynamic Data Loading Techniques in Distributed Deep Learning
+
+[Paper and Experiment Results](https://drive.google.com/file/d/1V-QY0chW-5uUDt-nn7vp1lpPx6EyfiZD/view?usp=share_link)
+
+## Abstract
+
+Large scale DL training pipelines involve high computational resource costs and can take exceedingly long time to complete. A typical bottleneck in these training pipelines is the occurrence of data stalls, where GPUs perform the forward and backward propagation of samples faster than the sample data can be loaded, leading to the GPUs idling as they wait for incoming data and delaying training epoch time significantly. Offloading preprocessing operations has become a popular technique to reduce the magnitude and impact of data stalls. However, in situations where the system is constrained by network bandwidth, reducing the total data traffic is crucial to maximize the benefits of offloading and reduce the total training time. Thus we propose a fine grained selective offloading approach which incorporates lossy compression, which reduces data traffic by 73% and average epoch time by 75%, compared to baseline approaches in our testing environment conditions for an image classification model. We find no significant cost to final model accuracy, given that the compression quality used is at least 50%.
+
+# Setup Guide
 
 This guide walks you through setting up the dataset, starting the storage server, and initiating the training process using an AlexNet model.
 
